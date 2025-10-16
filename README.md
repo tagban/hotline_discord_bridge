@@ -1,0 +1,1 @@
+Python Bot based on MacSecret's bot. This enhances a bit more adding in some cleaner usernames inside of Hotline. I plan to do a lot more with this so stay tuned. This eliminates the old process of perl bots and an IRC Bridge. 
