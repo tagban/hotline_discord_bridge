@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 # ⚠️ WARNING: Never share your Discord Bot Token!
 DISCORD_TOKEN = "INSERT_BOT_TOKEN_BETWEEN_QUOTES"  # Discord bot token string
 DISCORD_CHANNEL_ID = 1325831976392986696  # Discord channel ID INT (Must be an integer)
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/#####" # Webhook URL for dynamic sender names
-HOTLINE_HOST = "127.0.0.1"  # Hotline server IP or hostname
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/ID1234567" # Webhook URL for dynamic sender names
+HOTLINE_HOST = "127.0.0.1"  # Hotline server IP or hostname (e.g., Mobius Strip)
 HOTLINE_PORT = 5500  # Hotline port (default is 5500)
 # ---------------------
 
@@ -80,7 +80,7 @@ class HotlineClient:
             return False
         
         try:
-            # ✅ Encode to 'mac_roman', replacing unsupported chars (like emoji) with '?'
+            # Encode to 'mac_roman', replacing unsupported chars (like emoji) with '?'
             newhexchatmsg = message.encode('mac_roman', errors='replace')
 
             message_length = len(newhexchatmsg)
@@ -125,13 +125,19 @@ class HotlineClient:
                     left_part = hex_data[:8]
                     print("left part =" + left_part)
                     if (left_part == '0000006a'):
-        
+                        
                         try:
+
                             len_hex = hex_data[48:52]
                             message_length = int(len_hex, 16)
+                            
                             start_index = 52
                             end_index = start_index + (message_length * 2)
+                            
+                            # 3. Slice *only* the message data
                             text_data_hex = hex_data[start_index:end_index]
+                            
+
                             raw_bytes = bytes.fromhex(text_data_hex)
                             actual_message_with_user = raw_bytes.decode('mac_roman', errors='replace').strip()
                             
@@ -156,6 +162,7 @@ class HotlineClient:
         logger.info("Stopped listening for Hotline messages")
 
 class DiscordBot(commands.Bot):
+    # Modified __init__ to accept webhook_url
     def __init__(self, hotline_host: str, hotline_port: int, discord_channel_id: int, webhook_url: str):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -180,7 +187,11 @@ class DiscordBot(commands.Bot):
             logger.error("Failed to connect to Hotline server")
     
     async def on_message(self, message):
-        # DEBUG Statement || print(f"[DEBUG] Saw message from '{message.author.name}' in channel '{message.channel.name}' (ID: {message.channel.id})")
+        # === DEBUGGING LINE ===
+        # You can remove this print statement once everything is working
+        # print(f"[DEBUG] Saw message from '{message.author.name}' in channel '{message.channel.name}' (ID: {message.channel.id})")
+
+
         # Ignore messages from the bot itself
         if message.author == self.user:
             return
@@ -195,21 +206,28 @@ class DiscordBot(commands.Bot):
             print(f"[DEBUG] Ignored message: wrong channel. Expected: {self.discord_channel_id}, Got: {message.channel.id}")
             return
         
-        # --- Handle inline images/attachments from discord ---
+        # --- Images from Discord ---
         message_content = message.content  # Get the text part
         
         # Check for attachments (images, files, etc.)
         if message.attachments:
+            # Create a list of URLs from the attachments
             attachment_urls = [att.url for att in message.attachments]
             
+            # Append the URLs to the message content
+            # If there was text, add a space. If not, just join the URLs.
             if message_content:
                 message_content += " " + " ".join(attachment_urls)
             else:
                 message_content = " ".join(attachment_urls)
-    
+        
+        # If there's no text AND no attachments, do nothing.
+        # This requires the MESSAGE CONTENT INTENT to be enabled!
         if not message_content:
             logger.info("Ignoring empty message from Discord (no text or attachments).")
             return
+        # --- END OF LOGIC ---
+
         # Send message to Hotline
         if self.hotline_client.connected:
             # Use the potentially modified message_content
@@ -229,25 +247,36 @@ class DiscordBot(commands.Bot):
             print("Discarding message")
             return
 
-        # The Hotline client is passing a string like "Username: Message Content"
+        # --- Regex to find common image URLs ---
+        image_url_regex = re.compile(r"(https?://\S+\.(?:png|jpe?g|gif|webp))", re.IGNORECASE)
+        
         match = re.match(r"([^:]+):\s*(.*)", message)
         
         if match:
             username = match.group(1).strip()
             content = match.group(2).strip()
         else:
-            # Fallback for unexpected format (e.g., system messages)
+
             username = "Hotline System"
             content = message.strip()
+
+        embeds = []
+        image_match = image_url_regex.search(content)
+
+        if image_match:
+            image_url = image_match.group(1)
+            # Create an embed object for the image
+            embeds.append({
+                "image": {"url": image_url}
+            })
+            # Remove the URL from the content string to prevent it from appearing twice
+            content = image_url_regex.sub("", content).strip()
 
         payload = {
             "username": f"{username}",
             "content": content,
+            "embeds": embeds,  # <-- Add the new embeds list
             "allowed_mentions": {
-                # "parse" is an array of types to allow
-                # "users" allows @tagban to work
-                # "roles" allows @rolename to work
-                # By omitting "everyone", we block @everyone and @here
                 "parse": ["users", "roles"]
             }
         }
@@ -259,7 +288,7 @@ class DiscordBot(commands.Bot):
                         logger.info(f"Sent message to Discord via webhook: {username}: {content}")
                     else:
                         response_text = await response.text()
-                        logger.error(f"Failed to send webhook message. Status: {response.status}, Response: {response.text}")
+                        logger.error(f"Failed to send webhook message. Status: {response.status}, Response: {response_text}")
             except Exception as e:
                 logger.error(f"Error sending message to Discord webhook: {e}")
     
@@ -288,6 +317,7 @@ class DiscordBot(commands.Bot):
             await ctx.send("❌ Failed to reconnect to Hotline server")
 
 def main():
+    # Create and run the bot
     bot = DiscordBot(HOTLINE_HOST, HOTLINE_PORT, DISCORD_CHANNEL_ID, DISCORD_WEBHOOK_URL)
     
     try:
