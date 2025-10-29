@@ -84,7 +84,8 @@ def convert_emojis_to_ascii(text: str) -> str:
 
 def convert_ascii_to_emojis(text: str) -> str:
     for ascii_eq, emj in ASCII_TO_EMOJI.items():
-        text = text.replace(ascii_eq, emj)
+        pattern = rf'(?<!\w){re.escape(ascii_eq)}(?!\w)'
+        text = re.sub(pattern, emj, text)
     return text
 
 def sanitize_string(input_string):
