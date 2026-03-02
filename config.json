@@ -1,0 +1,8 @@
+{
+    "discord_token": "YOUR_DISCORD_TOKEN_HERE",
+    "discord_channel_id": YOUR_CHANNEL_ID(NO_QUOTES),
+    "discord_webhook_url": "YOUR_WEBHOOK_URL_HERE",
+    "hotline_host": "YOUR_HOTLINE_SERVER_ADDRESS_HERE",
+    "hotline_port": 5500,
+	"filtered_words": ["@here", "@everyone"]
+}
