@@ -1,1 +1,6 @@
-Python Bot based on MacSecret's bot. This enhances a bit more adding in some cleaner usernames inside of Hotline. I plan to do a lot more with this so stay tuned. This eliminates the old process of perl bots and an IRC Bridge. 
+This bot now handles emojis well, connects and reconnects, changes username to the user sending from Hotline in Discord, and will search for matching user in discord to use their icon if available.
+
+TODO: 
+  - Event Logging (Connect/Disconnect from server) (Configurable)
+  - Commands from Discord/Hotline chat to get information
+  
