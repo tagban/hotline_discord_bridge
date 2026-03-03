@@ -4,5 +4,14 @@
     "discord_webhook_url": "YOUR_WEBHOOK_URL_HERE",
     "hotline_host": "YOUR_HOTLINE_SERVER_ADDRESS_HERE",
     "hotline_port": 5500,
-	"filtered_words": ["@here", "@everyone"]
+	"filtered_words": ["@here", "@everyone"],
+    "manual_admins": ["Tagban", "Knezzen"],
+    "show_admins": true,
+    "admin_emoji": "🛡️",
+    "user_emoji": "",
+    "admin_prefix": "```fix\n",
+    "admin_suffix": "\n```",
+    "user_prefix": "",
+    "user_suffix": "",
+    "debug_mode": false
 }
