@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS `online_users` (
 ## 📂 Phase 3: Installation & Configuration
 
 1. **Requirements:**
+  You must have Python installed first!
    ```bash
    pip install discord.py aiomysql aiohttp
    ```
