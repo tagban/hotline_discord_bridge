@@ -1,80 +1,143 @@
 #!/usr/bin/env python3
 # coding=utf-8
-import asyncio, re, socket, binascii, logging, threading, time, json, os, aiohttp, discord
+import asyncio, re, socket, binascii, logging, threading, time, json, discord, aiomysql, aiohttp
+from datetime import datetime
+from aiohttp import web
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+class DatabaseLogger:
+    def __init__(self, config):
+        self.config = config
+        self.pool = None
+        self.enabled = config.get('use_web_features', False)
+
+    async def connect(self):
+        if not self.enabled: return
+        try:
+            self.pool = await aiomysql.create_pool(
+                host=self.config['mysql_host'], user=self.config['mysql_user'],
+                password=self.config['mysql_password'], db=self.config['mysql_db'],
+                autocommit=True
+            )
+            logger.info("✅ MySQL Connected")
+        except Exception as e:
+            logger.error(f"❌ MySQL Connection Error: {e}")
+            self.enabled = False 
+
+    async def update_presence(self, username, source, icon_id=128):
+        if not self.enabled or not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT icon_id FROM online_users WHERE username = %s", (username,))
+                    row = await cur.fetchone()
+                    if row and icon_id == 128 and row[0] != 128:
+                        await cur.execute("UPDATE online_users SET last_seen=NOW(), source=%s WHERE username=%s", (source, username))
+                    else:
+                        await cur.execute("""INSERT INTO online_users (username, source, icon_id, last_seen) 
+                                           VALUES (%s, %s, %s, NOW()) 
+                                           ON DUPLICATE KEY UPDATE last_seen=NOW(), icon_id=%s, source=%s""", 
+                                           (username, source, icon_id, icon_id, source))
+        except Exception as e:
+            logger.error(f"❌ DB Presence Update Error: {e}")
+
 class HotlineClient:
     def __init__(self, config, bot):
-        self.host, self.port = config['hotline_host'], config['hotline_port']
+        self.config = config
         self.bot = bot
-        self.socket, self.connected = None, False
-        self.msg_cache = set()
+        self.socket = None
+        self.connected = False
+        self.connect_time = 0
+        self.user_icons = {} 
+
+    def get_login_hex(self):
+        """Generates a strictly-aligned Hotline login packet using TRTP protocol rules"""
+        nick = self.config.get('bridge_nickname', 'Relay')
+        icon_id = int(self.config.get('hotline_icon', 128))
+        
+        # Encode Data
+        nick_bytes = nick.encode('ascii', errors='ignore')
+        
+        # Field 0x0066 (Nickname) + Field 0x0068 (Icon)
+        f_name = binascii.unhexlify("0066") + len(nick_bytes).to_bytes(2, 'big') + nick_bytes
+        f_icon = binascii.unhexlify("00680002") + icon_id.to_bytes(2, 'big')
+        field_data = f_name + f_icon
+        
+        # Header Construction
+        header = binascii.unhexlify("0000006B0000000100000000")
+        total_len = (len(field_data) + 2).to_bytes(4, 'big') 
+        field_count = (2).to_bytes(2, 'big')
+        
+        return header + total_len + total_len + field_count + field_data
 
     def connect(self):
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(10)
-            self.socket.connect((self.host, self.port))
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            self.socket.settimeout(120)
+            self.socket.connect((self.config['hotline_host'], self.config['hotline_port']))
             
-            # 1. TRTP Handshake
+            # TRTP Handshake
             self.socket.send(bytes.fromhex("54525450484F544C00010002"))
+            time.sleep(1.5) 
+            self.socket.send(self.get_login_hex())
             
-            # 2. Simplified Login (0x6b) - Static Guest Hex
-            login = bytes.fromhex("0000006B00000001000000000000001300000013000200660007446973636F72640068000207D00000012C00000002000000000000000200000002000000000065000000030000000000000002000000020000")
-            self.socket.send(login)
-            
-            self.socket.setblocking(False)
             self.connected = True
-            logger.info("✅ Hotline Connected (Guest Mode)")
+            self.connect_time = time.time()
+            logger.info(f"✅ Hotline Connected as {self.config.get('bridge_nickname')} (Icon: {self.config.get('hotline_icon')})")
             return True
         except Exception as e:
-            logger.error(f"❌ Connection error: {e}")
+            logger.error(f"❌ Hotline Connection: {e}")
             return False
 
     def send_chat(self, message):
-        if not self.connected: return
+        if not self.connected or not self.socket: return
         try:
-            # Basic sanitization for Hotline's ASCII-only chat
-            clean_text = "".join(c for c in message if 32 <= ord(c) <= 126)
-            self.msg_cache.add(clean_text)
-            if len(self.msg_cache) > 50: self.msg_cache.clear()
-            
-            msg_bytes = clean_text.encode("utf-8")
-            pkt = binascii.unhexlify("00000069000000FF00000000") 
-            m_len = (len(msg_bytes) + 6).to_bytes(4, "big")
-            pkt += m_len + m_len + binascii.unhexlify("00010065") + len(msg_bytes).to_bytes(2, "big") + msg_bytes
+            msg_bytes = message.encode("ascii", errors='ignore')
+            m_len = (len(msg_bytes) + 6).to_bytes(4, 'big')
+            pkt = binascii.unhexlify("00000069000000FF00000000") + m_len + m_len + binascii.unhexlify("00010065") + len(msg_bytes).to_bytes(2, 'big') + msg_bytes
             self.socket.send(pkt)
-        except: pass
+        except: self.connected = False
 
     def listen(self):
+        nick = self.config.get('bridge_nickname', 'Relay').lower()
         while self.connected:
             try:
-                time.sleep(0.1)
-                try:
-                    data = self.socket.recv(16384)
-                except BlockingIOError: continue
-                
+                data = self.socket.recv(65535)
                 if not data: break
-                hex_d = data.hex()
 
-                if self.bot.config.get("debug_mode", False) and len(hex_d) > 20:
-                    logger.info(f"DEBUG HEX: {hex_d}")
+                # Parse Icons
+                if self.config.get('use_hotline_icons', True):
+                    if b'\x00\x66' in data and b'\x00\x68\x00\x02' in data:
+                        try:
+                            n_idx = data.find(b'\x00\x66') + 2
+                            n_len = int.from_bytes(data[n_idx:n_idx+2], 'big')
+                            f_name = data[n_idx+2:n_idx+2+n_len].decode('ascii', errors='ignore').strip()
+                            i_idx = data.rfind(b'\x00\x68\x00\x02') + 4
+                            f_icon = int.from_bytes(data[i_idx:i_idx+2], 'big')
+                            if f_name and f_icon > 0:
+                                self.user_icons[f_name] = f_icon
+                                if self.bot.db.enabled:
+                                    asyncio.run_coroutine_threadsafe(self.bot.db.update_presence(f_name, "Hotline", f_icon), self.bot.loop)
+                        except: pass
 
-                # Chat parser (0x6a)
-                if "0000006a" in hex_d:
-                    pos = hex_d.find("0000006a") // 2
-                    raw = data[pos+20:].decode('utf-8', errors='ignore').strip()
-                    if ":" in raw:
-                        user = raw.split(":", 1)[0].strip().split()[-1]
-                        msg = raw.split(":", 1)[1].strip()
-                        
-                        is_admin = user.lower() in [a.lower() for a in self.bot.config.get("manual_admins", [])]
-                        
-                        if user.lower() != "discord" and msg not in self.msg_cache:
-                            asyncio.run_coroutine_threadsafe(self.bot.send_to_discord(user, msg, is_admin), self.bot.loop)
+                # Parse Chat
+                if time.time() - self.connect_time > 4 and b'\x00\x65' in data:
+                    try:
+                        parts = data.split(b'\x00\x65', 1)[1]
+                        clean = "".join([chr(b) if (31 < b < 127) else " " for b in parts])
+                        if ":" in clean:
+                            user = clean.split(":", 1)[0].strip().split()[-1]
+                            msg = clean.split(":", 1)[1].strip()
+                            msg = re.split(r'\s{2,}', msg)[0] 
+                            if user.lower() not in [nick, "discord"] and "---" not in clean:
+                                current_icon = self.user_icons.get(user, 128)
+                                asyncio.run_coroutine_threadsafe(self.bot.sync_from_remote("Hotline", user, msg, current_icon), self.bot.loop)
+                    except: pass
+            except socket.timeout: continue
             except: break
         self.connected = False
 
@@ -82,74 +145,80 @@ class DiscordBot(discord.Client):
     def __init__(self, config):
         intents = discord.Intents.default()
         intents.message_content = True
-        intents.members = True 
         super().__init__(intents=intents)
         self.config = config
         self.hl = HotlineClient(config, self)
+        self.db = DatabaseLogger(config)
+
+    async def setup_hook(self):
+        if self.config.get('use_web_features', False):
+            app = web.Application()
+            app.router.add_post('/webhook', self.handle_web_chat)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            await web.TCPSite(runner, '0.0.0.0', self.config.get('webhook_port', 54230)).start()
+            logger.info("🌐 Webhook Receiver Enabled")
+
+    async def handle_web_chat(self, request):
+        if request.headers.get('X-Bridge-Key') != self.config.get('web_secret_key'): return web.Response(status=403)
+        data = await request.json()
+        await self.sync_from_remote("Web", data.get('author', 'Web'), data.get('message', ''), 131)
+        return web.Response(text="OK")
 
     async def on_ready(self):
-        print(f"--- BRIDGE ONLINE ---\nUser: {self.user}")
+        logger.info(f"--- BRIDGE OPERATIONAL: {self.user} ---")
+        if self.db.enabled: await self.db.connect()
         threading.Thread(target=self.hotline_worker, daemon=True).start()
 
     def hotline_worker(self):
         while True:
-            try:
-                if not self.hl.connected:
-                    if self.hl.connect():
-                        self.hl.listen()
-            except Exception as e:
-                logger.error(f"Worker Error: {e}")
+            if not self.hl.connected:
+                if self.hl.connect(): self.hl.listen()
             time.sleep(10)
 
     async def on_message(self, message):
-        if message.author == self.user or message.webhook_id: return
-        if message.channel.id != self.config['discord_channel_id']: return
-        self.hl.send_chat(f"{message.author.display_name}: {message.content}")
+        if message.author == self.user or message.webhook_id or message.channel.id != self.config['discord_channel_id']: return
+        content = message.content
+        for att in message.attachments: content += f" {att.url}"
+        if content.strip(): 
+            await self.sync_from_remote("Discord", message.author.display_name, content, 134)
 
-    async def send_to_discord(self, user, msg, is_admin=False):
-        # 1. Filter restricted words
-        for word in self.config.get('filtered_words', []):
-            msg = re.compile(re.escape(word), re.IGNORECASE).sub("[filtered]", msg)
+    async def sync_from_remote(self, source, author, msg, icon_id=128):
+        filtered = self.config.get('filtered_words', [])
+        spam_triggers = ["live.bigredh.com", "40):", "website"] + filtered
+        if any(t.lower() in msg.lower() for t in spam_triggers) or any(t.lower() in author.lower() for t in spam_triggers):
+            return
+
+        final_msg = msg
+        if source == "Discord":
+            final_msg = re.sub(r'<(a?):([a-zA-Z0-9_]+):([0-9]+)>', 
+                               lambda m: f"https://cdn.discordapp.com/emojis/{m.group(3)}.{'gif' if m.group(1) else 'webp'}?size=48", 
+                               msg)
         
-        # 2. Fetch style settings
-        a_emoji = self.config.get('admin_emoji', "🛡️")
-        u_emoji = self.config.get('user_emoji', "🌍")
-        
-        if is_admin:
-            name_prefix = f"{a_emoji} " if self.config.get('show_admins', True) else ""
-            c_prefix = self.config.get('admin_prefix', "")
-            c_suffix = self.config.get('admin_suffix', "")
-        else:
-            name_prefix = f"{u_emoji} " if u_emoji else ""
-            c_prefix = self.config.get('user_prefix', "")
-            c_suffix = self.config.get('user_suffix', "")
+        if self.db.enabled:
+            await self.db.update_presence(author, source, icon_id)
+            async with self.db.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    sql = "INSERT INTO chat_logs (source, author, timestamp, message, processed) VALUES (%s, %s, NOW(), %s, 0)"
+                    try: await cur.execute(sql, (source, author, final_msg))
+                    except Exception as e: logger.error(f"❌ MySQL Insert Error: {e}")
 
-        # 3. Format plain text body
-        display_name = f"{name_prefix}{user}"
-        formatted_content = f"{c_prefix}{msg}{c_suffix}"
-
-        # 4. Handle Avatar
-        avatar = str(self.user.display_avatar.url)
-        chan = self.get_channel(self.config['discord_channel_id'])
-        if chan:
-            match = discord.utils.find(lambda m: m.display_name.lower() == user.lower() or m.name.lower() == user.lower(), chan.guild.members)
-            if match: avatar = str(match.display_avatar.url)
+        if source != "Discord":
+            payload = {"username": f"{author} [{source}]", "content": final_msg}
+            if self.config.get('use_hotline_icons', True):
+                relay_icon = self.hl.user_icons.get(author, icon_id)
+                base_url = self.config.get('icon_url_base', 'http://hlwiki.com/ik0ns/')
+                payload["avatar_url"] = f"{base_url}{relay_icon}.png"
             
-        # 5. Send payload to Webhook
-        payload = {
-            "username": display_name,
-            "avatar_url": avatar,
-            "content": formatted_content
-        }
-
-        async with aiohttp.ClientSession() as sess:
-            await sess.post(self.config['discord_webhook_url'], json=payload)
+            async with aiohttp.ClientSession() as sess:
+                await sess.post(self.config['discord_webhook_url'], json=payload)
+        
+        if source != "Hotline":
+            safe_msg = final_msg.encode("ascii", "ignore").decode("ascii")
+            if safe_msg.strip():
+                self.hl.send_chat(f"{source} | {author}: {safe_msg}")
 
 if __name__ == "__main__":
-    try:
-        with open("config.json", 'r', encoding="utf-8") as f: 
-            config = json.load(f)
-        bot = DiscordBot(config)
-        bot.run(config['discord_token'])
-    except Exception as e:
-        print(f"CRITICAL STARTUP ERROR: {e}")
+    with open("config.json", 'r', encoding="utf-8") as f: config = json.load(f)
+    bot = DiscordBot(config)
+    bot.run(config['discord_token'])
