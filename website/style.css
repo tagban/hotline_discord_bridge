@@ -1,0 +1,95 @@
+/* --- CORE TERMINAL THEME --- */
+:root {
+    --bg: #050505;
+    --green: #00ff00;
+    --gold: #ffcc00;
+    --red: #ff0000;
+    --discord: #7289da;
+    --border: #1a1a1a;
+    --font: 'Courier New', Courier, monospace;
+}
+
+body {
+    background-color: var(--bg);
+    color: var(--green);
+    font-family: var(--font);
+    margin: 0;
+    overflow: hidden;
+}
+
+/* --- MONITOR LAYOUT --- */
+.chat-container {
+    display: flex;
+    height: 94vh;
+    margin: 15px auto;
+    width: 98%;
+    border: 1px solid var(--border);
+    background: #000;
+}
+
+#chat-viewport {
+    flex: 1;
+    overflow-y: auto;
+    padding: 15px;
+    border-right: 1px solid var(--border);
+    scrollbar-width: thin;
+    scrollbar-color: #333 #000;
+}
+
+/* --- SIDEBAR & LAYERED ICONS --- */
+#user-list {
+    width: 240px;
+    padding: 15px;
+    background: #080808;
+    overflow-x: hidden;
+}
+
+.user-row {
+    position: relative;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    margin-bottom: 6px;
+    padding-left: 28px; /* The 22px+ buffer from the left */
+}
+
+.bg-icon {
+    position: absolute;
+    left: 2px;
+    height: 30px;
+    width: auto;
+    opacity: 0.5; /* Ghosted behind the name */
+    z-index: 1;
+    pointer-events: none;
+    image-rendering: pixelated; /* Keeps retro icons crisp */
+}
+
+.user-name {
+    position: relative;
+    z-index: 2;
+    font-weight: bold;
+    font-size: 1.1em;
+    text-shadow: 2px 2px 2px #000, -1px -1px 0 #000; /* High contrast over icon */
+}
+
+/* SOURCE COLORS */
+.hotline-entry .user-name { color: var(--red); }
+.discord-entry .user-name { color: var(--discord); }
+.web-entry .user-name     { color: var(--green); }
+
+/* --- CHAT ELEMENTS --- */
+.discord-emoji {
+    height: 22px;
+    width: auto;
+    vertical-align: middle;
+    margin: 0 2px;
+}
+
+.chat-img {
+    max-width: 300px;
+    border: 1px solid #333;
+    margin: 8px 0;
+    display: block;
+}
+
+.line { margin-bottom: 5px; line-height: 1.4; }
