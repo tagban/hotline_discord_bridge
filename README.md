@@ -1,53 +1,117 @@
+This is the complete documentation for the **BigRedH Hotline-Discord Bridge**, formatted for a GitHub `README.md` file.
 
+---
 
-Setup Discord Bot Side:
-🛠️ Phase 1: Creating the Application
-Log In: Go to the Discord Developer Portal and log in with your Discord account.
-New Application: Click the "New Application" button in the top right.
-Name It: Give your bot a name (e.g., BigRedH-Bridge) and agree to the terms.
-Save Changes: You are now in the General Information tab. You can upload an icon here that will represent the bot in Discord.
+```markdown
+# BigRedH Hotline-Discord Bridge
 
-🤖 Phase 2: Configuring the Bot User
-Navigate to "Bot": On the left-hand sidebar, click the Bot tab.
-Reset Token: Click "Reset Token" (or "Copy Token" if it's the first time) to generate your Bot Token.
-⚠️ CRITICAL: This token is your bot's password. Copy it now and save it. You will paste this into your config.json as the discord_token. Never share this token.
-Privileged Gateway Intents: Scroll down to the "Privileged Gateway Intents" section. You MUST toggle these to ON:
-Presence Intent: (Helps track user status).
-Server Members Intent: (Helps the bot see who is in the channel).
-Message Content Intent: (MANDATORY). Without this, your bot can see that a message was sent, but it cannot read the text to relay it to Hotline.
+A robust, state-of-the-art bridge connecting retro Hotline Communications servers with modern Discord channels. This tool features deep packet scanning for icons, a real-time web monitor, and smart persistence for user identities.
 
-🔗 Phase 3: Inviting the Bot to Your Server
-OAuth2 URL Generator: On the left sidebar, go to OAuth2 -> URL Generator.
-Select Scopes: Check the box for bot.
-Select Permissions: A new list will appear. Select the following:
-Read Messages/View Channels
-Send Messages
-Embed Links
-Attach Files
-Read Message History
-Use External Emojis (Important for your custom emoji relay!)
-Copy the Link: At the bottom, a URL will be generated. Copy this URL and paste it into your browser.
-Authorize: Select the server you want the bridge to live in and click Authorize.
+## 🚀 Features
+* **Bi-directional Chat:** Real-time relay between Hotline, Discord, and Web.
+* **Icon Persistence:** Automatically caches and maps Hotline Icon IDs to Discord avatars.
+* **Web Monitor:** Optional PHP-based live stream and user list for websites.
+* **Stability:** Integrated socket keep-alive and 120-second idle timeouts.
+* **Spam Filtering:** Built-in protection against login "ghost" messages and filtered words.
 
-🪝 Phase 4: Setting Up the Webhook
-Discord Webhooks are used by the bot to "impersonate" Hotline users (so they get their own name and icon).
-Open Discord: Go to the channel where you want the bridge messages to appear.
-Channel Settings: Click the Edit Channel (cog icon) next to the channel name.
-Integrations: Go to Integrations -> Webhooks.
-New Webhook: Click "Create Webhook".
-Copy URL: Click on the new webhook and click "Copy Webhook URL".
-This goes into your config.json (Python) as discord_webhook_url.
+---
 
-📂 Phase 5: Connecting the Python Script
-Open your config.json file and ensure the IDs you gathered match up:
+## 🛠️ Phase 1: Database Setup (Optional)
+If you intend to use the **Web Monitor** features (`use_web_features: true`), run the following script in your MySQL manager (e.g., phpMyAdmin) to initialize your tables.
 
-JSON
+```sql
+-- 1. Create the Chat Logs table
+CREATE TABLE IF NOT EXISTS `chat_logs` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `source` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `author` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `timestamp` datetime DEFAULT CURRENT_TIMESTAMP,
+  `message` text COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `processed` tinyint(1) DEFAULT 0,
+  PRIMARY KEY (`id`),
+  KEY `idx_timestamp` (`timestamp`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 2. Create the Online Users table
+CREATE TABLE IF NOT EXISTS `online_users` (
+  `username` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `source` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `icon_id` int(11) DEFAULT 128,
+  `last_seen` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`username`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+```
+
+---
+
+## 🤖 Phase 2: Discord Configuration
+1. **Create Application:** Visit the [Discord Developer Portal](https://discord.com/developers/applications) and create a New Application.
+2. **Bot Token:** Go to the **Bot** tab, click **Reset Token**, and save the string.
+3. **Privileged Intents:** You **MUST** scroll down to the "Privileged Gateway Intents" section and toggle **Message Content Intent** to **ON**.
+4. **Invite Bot:** Under **OAuth2 -> URL Generator**, select `bot` and `Administrator` (or specific permissions for Webhooks/Messages) and use the link to invite the bot to your server.
+5. **Webhook:** In your Discord Channel Settings, go to **Integrations -> Webhooks**, create a new one, and copy the **Webhook URL**.
+
+---
+
+## 📂 Phase 3: Installation & Configuration
+
+1. **Requirements:**
+   ```bash
+   pip install discord.py aiomysql aiohttp
+   ```
+2. **Setup `config.json`:**
+   Create a file named `config.json` in your bot directory:
+
+```json
 {
-    "discord_token": "PASTE_TOKEN_FROM_PHASE_2",
-    "discord_webhook_url": "PASTE_URL_FROM_PHASE_4",
-    "discord_channel_id": 123456789012345678, 
+    "discord_token": "INSERT_BOT_TOKEN_HERE",
+    "discord_channel_id": 0,
+    "discord_guild_id": 0,
+    "discord_webhook_url": "[https://discord.com/api/webhooks/](https://discord.com/api/webhooks/)...",
+    "discord_status": "online",
+    "discord_activity_type": "watching",
+    "discord_activity_name": "hotline://your-server-address",
+
+    "hotline_host": "0.0.0.0",
+    "hotline_port": 5500,
     "bridge_nickname": "Relay",
-    "hotline_host": "server.bigredh.com",
-    "hotline_port": 5500
+    "use_hotline_icons": true,
+    "icon_url_base": "[http://hlwiki.com/ik0ns/](http://hlwiki.com/ik0ns/)",
+
+    "use_web_features": false,
+    "mysql_host": "localhost",
+    "mysql_user": "root",
+    "mysql_password": "",
+    "mysql_db": "bridge_db",
+    "webhook_port": 54230,
+    "web_secret_key": "RANDOM_SECRET_STRING",
+
+    "filtered_words": ["@here", "@everyone"],
+    "manual_admins": ["AdminName"]
 }
-Pro-Tip: To get your discord_channel_id, enable Developer Mode in Discord (User Settings -> Advanced -> Developer Mode), then right-click your channel and select "Copy Channel ID".
+```
+
+---
+
+## 🖥️ Phase 4: Web Monitor Setup (Optional)
+1. Upload `index.php`, `fetch_chat.php`, `fetch_users.php`, and `config.php` to your web server.
+2. Configure `config.php` with your MySQL credentials.
+3. The web interface will automatically poll the database and display the chat using a "cache-buster" to ensure real-time updates.
+
+---
+
+## 🚦 Phase 5: Running the Bridge
+Simply execute the Python script:
+```bash
+python bridge_bot.py
+```
+Check the console for connection confirmations:
+* `✅ MySQL Connected` (If enabled)
+* `✅ Hotline Connected`
+* `--- BRIDGE OPERATIONAL ---`
+
+---
+
+## ⚖️ License
+Distributed under the MIT License. See `LICENSE` for more information.
+```
