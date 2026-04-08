@@ -8,6 +8,33 @@ from aiohttp import web
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Emoji Translation Map - Using double-backslashes for escape safety
+EMOJI_MAP = {
+    "😀": ":D", "😄": ":D", "😁": ":D", "😅": ":P",
+    "😂": "XD", "🤣": "XD", "🙂": ":)", "🙃": "(:",
+    "😉": ";)", "😊": ":)", "😇": "o:)", "🥰": "<3",
+    "😍": "<3", "🤩": ":O", "😘": ":*", "😗": ":*",
+    "☺️": ":)", "😚": ":*", "😙": ":*", "😋": ":P",
+    "😛": ":P", "😜": ";P", "🤪": "8P", "😝": "xP",
+    "🤑": "$", "🤗": "\\o/", "🤭": ":X", "🤫": ":X",
+    "🤔": ":?", "🤐": ":X", "🤨": "o.O", "😐": ":|",
+    "😑": "-_-", "😶": ":|", "😏": ";)", "😒": ":/",
+    "🙄": "o.O", "😬": ":S", "🤥": ":L", "😌": ":)",
+    "😔": ":(", "😪": ":|", "😴": "zzZ", "😷": ":S",
+    "🤒": ":S", "🤕": ":S", "🤢": ":S", "🤮": ":O",
+    "🤧": ":S", "🥵": "!!", "🥶": "??", "🥴": "8S",
+    "😵": "Xo", "🤯": ":O", "🤠": "8)", "🥳": "\\o/",
+    "😎": "8)", "🤓": "B)", "🧐": "8.", "😕": ":/",
+    "😟": ":(", "🙁": ":(", "😮": ":O", "😯": ":O",
+    "😲": ":O", "😳": ":O", "🥺": ":(", "😦": ":O",
+    "😧": ":O", "😨": ":O", "😰": ":S", "😥": ":(",
+    "😢": ":(", "😭": "=(", "😱": ":O", "😖": ":S",
+    "😣": ":S", "😞": ":(", "😓": ":(", "😩": "X(",
+    "😫": "X(", "🥱": ":O", "😤": ">:(", "😡": ">:(",
+    "😠": ">:(", "🤬": ":@", "😈": " >:) ", "👿": " >:( ",
+    "💀": " [x] ", "💩": " (p) ", "👍": "(Y)", "👎": "(N)"
+}
+
 class DatabaseLogger:
     def __init__(self, config):
         self.config = config
@@ -54,23 +81,15 @@ class HotlineClient:
         self.user_icons = {} 
 
     def get_login_hex(self):
-        """Generates a strictly-aligned Hotline login packet using TRTP protocol rules"""
         nick = self.config.get('bridge_nickname', 'Relay')
         icon_id = int(self.config.get('hotline_icon', 128))
-        
-        # Encode Data
         nick_bytes = nick.encode('ascii', errors='ignore')
-        
-        # Field 0x0066 (Nickname) + Field 0x0068 (Icon)
         f_name = binascii.unhexlify("0066") + len(nick_bytes).to_bytes(2, 'big') + nick_bytes
         f_icon = binascii.unhexlify("00680002") + icon_id.to_bytes(2, 'big')
         field_data = f_name + f_icon
-        
-        # Header Construction
         header = binascii.unhexlify("0000006B0000000100000000")
         total_len = (len(field_data) + 2).to_bytes(4, 'big') 
         field_count = (2).to_bytes(2, 'big')
-        
         return header + total_len + total_len + field_count + field_data
 
     def connect(self):
@@ -79,15 +98,12 @@ class HotlineClient:
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             self.socket.settimeout(120)
             self.socket.connect((self.config['hotline_host'], self.config['hotline_port']))
-            
-            # TRTP Handshake
             self.socket.send(bytes.fromhex("54525450484F544C00010002"))
             time.sleep(1.5) 
             self.socket.send(self.get_login_hex())
-            
             self.connected = True
             self.connect_time = time.time()
-            logger.info(f"✅ Hotline Connected as {self.config.get('bridge_nickname')} (Icon: {self.config.get('hotline_icon')})")
+            logger.info(f"✅ Hotline Connected as {self.config.get('bridge_nickname')}")
             return True
         except Exception as e:
             logger.error(f"❌ Hotline Connection: {e}")
@@ -108,8 +124,6 @@ class HotlineClient:
             try:
                 data = self.socket.recv(65535)
                 if not data: break
-
-                # Parse Icons
                 if self.config.get('use_hotline_icons', True):
                     if b'\x00\x66' in data and b'\x00\x68\x00\x02' in data:
                         try:
@@ -124,7 +138,6 @@ class HotlineClient:
                                     asyncio.run_coroutine_threadsafe(self.bot.db.update_presence(f_name, "Hotline", f_icon), self.bot.loop)
                         except: pass
 
-                # Parse Chat
                 if time.time() - self.connect_time > 4 and b'\x00\x65' in data:
                     try:
                         parts = data.split(b'\x00\x65', 1)[1]
@@ -145,6 +158,7 @@ class DiscordBot(discord.Client):
     def __init__(self, config):
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.members = True 
         super().__init__(intents=intents)
         self.config = config
         self.hl = HotlineClient(config, self)
@@ -157,7 +171,6 @@ class DiscordBot(discord.Client):
             runner = web.AppRunner(app)
             await runner.setup()
             await web.TCPSite(runner, '0.0.0.0', self.config.get('webhook_port', 54230)).start()
-            logger.info("🌐 Webhook Receiver Enabled")
 
     async def handle_web_chat(self, request):
         if request.headers.get('X-Bridge-Key') != self.config.get('web_secret_key'): return web.Response(status=403)
@@ -184,24 +197,37 @@ class DiscordBot(discord.Client):
             await self.sync_from_remote("Discord", message.author.display_name, content, 134)
 
     async def sync_from_remote(self, source, author, msg, icon_id=128):
+        if source != "Discord":
+            if "@everyone" in msg.lower() or "@here" in msg.lower():
+                msg = msg.replace("@everyone", "everyone").replace("@here", "here")
+        
         filtered = self.config.get('filtered_words', [])
-        spam_triggers = ["live.bigredh.com", "40):", "website"] + filtered
-        if any(t.lower() in msg.lower() for t in spam_triggers) or any(t.lower() in author.lower() for t in spam_triggers):
-            return
+        if any(t.lower() in msg.lower() for t in filtered): return
 
         final_msg = msg
+
+        if source == "Hotline" and "@" in final_msg:
+            guild = self.get_guild(int(self.config.get('discord_guild_id', 0)))
+            if guild:
+                for member in guild.members:
+                    mention_tag = f"@{member.display_name}"
+                    if mention_tag in final_msg:
+                        final_msg = final_msg.replace(mention_tag, member.mention)
+
         if source == "Discord":
             final_msg = re.sub(r'<(a?):([a-zA-Z0-9_]+):([0-9]+)>', 
                                lambda m: f"https://cdn.discordapp.com/emojis/{m.group(3)}.{'gif' if m.group(1) else 'webp'}?size=48", 
-                               msg)
-        
+                               final_msg)
+            for char, ascii_art in EMOJI_MAP.items():
+                final_msg = final_msg.replace(char, ascii_art)
+
         if self.db.enabled:
             await self.db.update_presence(author, source, icon_id)
             async with self.db.pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     sql = "INSERT INTO chat_logs (source, author, timestamp, message, processed) VALUES (%s, %s, NOW(), %s, 0)"
                     try: await cur.execute(sql, (source, author, final_msg))
-                    except Exception as e: logger.error(f"❌ MySQL Insert Error: {e}")
+                    except Exception as e: logger.error(f"❌ SQL Error: {e}")
 
         if source != "Discord":
             payload = {"username": f"{author} [{source}]", "content": final_msg}
@@ -214,9 +240,9 @@ class DiscordBot(discord.Client):
                 await sess.post(self.config['discord_webhook_url'], json=payload)
         
         if source != "Hotline":
-            safe_msg = final_msg.encode("ascii", "ignore").decode("ascii")
-            if safe_msg.strip():
-                self.hl.send_chat(f"{source} | {author}: {safe_msg}")
+            hotline_safe = final_msg.encode("ascii", "ignore").decode("ascii")
+            if hotline_safe.strip():
+                self.hl.send_chat(f"{source} | {author}: {hotline_safe}")
 
 if __name__ == "__main__":
     with open("config.json", 'r', encoding="utf-8") as f: config = json.load(f)
