@@ -1,3 +1,6 @@
+
+
+Setup Discord Bot Side:
 🛠️ Phase 1: Creating the Application
 Log In: Go to the Discord Developer Portal and log in with your Discord account.
 New Application: Click the "New Application" button in the top right.
