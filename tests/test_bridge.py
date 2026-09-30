@@ -108,3 +108,20 @@ def test_our_names_leave_discord_py_alone():
     ours = set(vars(b)) - set(vars(plain))
     clash = {n for n in ours if hasattr(discord.Client, n)}
     assert ours and not clash, clash
+
+
+def test_square_icons():
+    import io
+    from PIL import Image
+
+    def png(w, h):
+        out = io.BytesIO()
+        Image.new("RGBA", (w, h), (255, 0, 0, 255)).save(out, "PNG")
+        return out.getvalue()
+
+    for w, h in ((232, 18), (267, 18), (16, 16), (32, 32), (20, 16)):
+        im = Image.open(io.BytesIO(hl_bridge.square_icon(png(w, h))))
+        assert im.size == (128, 128)
+    # a banner keeps only its left end, centered: the top row is transparent padding
+    im = Image.open(io.BytesIO(hl_bridge.square_icon(png(232, 18))))
+    assert im.getpixel((64, 0))[3] == 0 and im.getpixel((64, 64))[3] == 255

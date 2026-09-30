@@ -46,6 +46,9 @@ services:
     restart: unless-stopped
     volumes:
       - ./config.json:/config/config.json:ro
+    # Square icons for Discord's avatars (icon_public_url, icon_server_port)
+    ports:
+      - "54232:54232"
     # A Hotline server on this same machine: "hotline_host": "host.docker.internal"
     extra_hosts:
       - "host.docker.internal:host-gateway"

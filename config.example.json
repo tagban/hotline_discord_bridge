@@ -14,6 +14,8 @@
     "hotline_icon": 128,
     "use_hotline_icons": true,
     "icon_url_base": "http://hlwiki.com/ik0ns/",
+    "icon_public_url": "",
+    "icon_server_port": 54232,
     "translate_hotline_faces": true,
     "filtered_words": [
         "@here",

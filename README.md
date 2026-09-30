@@ -44,6 +44,7 @@ It runs in Docker and stays up on its own:
 | `hotline_login`, `hotline_password` | An account there; empty joins as a guest |
 | `bridge_nickname`, `hotline_icon` | Its name and icon in the Hotline user list |
 | `use_hotline_icons`, `icon_url_base` | Speakers' Hotline icons as their Discord pictures |
+| `icon_public_url`, `icon_server_port` | Square avatars: the bridge crops Hotline's wide banner icons to their left end (the actual icon), enlarges them sharply to 128 × 128 and serves them at this address, e.g. `http://your-server:54232/icons/`. Empty uses the icons as they are |
 | `translate_hotline_faces` | `:)` → 🙂 on the way to Discord |
 | `filtered_words` | Lines containing any of these aren't relayed |
 | `use_web_features`, `webhook_port`, `web_secret_key`, `mysql_*` | The web monitor (see below) |

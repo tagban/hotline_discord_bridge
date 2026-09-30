@@ -28,6 +28,9 @@ import sys
 import time
 from collections import deque
 
+import io
+from collections import OrderedDict
+
 import aiohttp
 import discord
 from aiohttp import web
@@ -93,6 +96,26 @@ def load_config(path: str) -> dict:
         if os.environ.get(env):
             c[k] = os.environ[env]
     return c
+
+
+def square_icon(data: bytes, size: int = 128) -> bytes:
+    """A Hotline icon as a square Discord avatar. The wide ones (232-267 x 18) are banners
+    whose icon is the left end, about 26 pixels: that part, centered in a square. Small
+    square ones are just enlarged. Pixels stay sharp (nearest neighbor), as drawn."""
+    from PIL import Image
+    im = Image.open(io.BytesIO(data)).convert("RGBA")
+    w, h = im.size
+    if w > h * 2:
+        im = im.crop((0, 0, min(w, round(h * 1.45)), h))
+        w, h = im.size
+    if w != h:
+        side = max(w, h)
+        canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        canvas.paste(im, ((side - w) // 2, (side - h) // 2))
+        im = canvas
+    out = io.BytesIO()
+    im.resize((size, size), Image.NEAREST).save(out, "PNG")
+    return out.getvalue()
 
 
 def hotline_text(text: str) -> str:
@@ -194,6 +217,7 @@ class Bridge(discord.Client):
         self.outbox: deque = deque(maxlen=50)  # Discord -> Hotline while Hotline is down: (time, line)
         self.session: aiohttp.ClientSession | None = None
         self.filtered = [w.lower() for w in c.get("filtered_words", [])]
+        self.squares: OrderedDict[int, bytes] = OrderedDict()  # icon -> square PNG, most recent last
 
     # ---- start-up: runs once, however often Discord reconnects ----
 
@@ -207,6 +231,14 @@ class Bridge(discord.Client):
             await runner.setup()
             await web.TCPSite(runner, "0.0.0.0", int(self.c.get("webhook_port", 54230))).start()
             log.info("Web relay listening on port %s", self.c.get("webhook_port", 54230))
+        if self.c.get("icon_public_url"):
+            app = web.Application()
+            app.router.add_get("/icons/{icon}.png", self.icon_square)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            port = int(self.c.get("icon_server_port", 54232))
+            await web.TCPSite(runner, "0.0.0.0", port).start()
+            log.info("Square icons served on port %s as %s", port, self.c["icon_public_url"])
         self.loop.create_task(self.hotline_forever())
         self.loop.create_task(self.watchdog())
 
@@ -323,6 +355,44 @@ class Bridge(discord.Client):
             text = discord_text(text)
         await self.to_discord(who, "Hotline", f"*{text}*" if emote else text)
 
+    # ---- square icons, for Discord's avatars ----
+
+    async def icon_square(self, request: web.Request) -> web.Response:
+        """/icons/<n>.png: icon n from icon_url_base, squared (see square_icon). Kept in memory."""
+        try:
+            n = int(request.match_info["icon"])
+        except ValueError:
+            raise web.HTTPNotFound()
+        if not 0 <= n <= 65535:
+            raise web.HTTPNotFound()
+        png = self.squares.get(n)
+        if png is None:
+            base = self.c.get("icon_url_base", "http://hlwiki.com/ik0ns/")
+            assert self.session
+            try:
+                async with self.session.get(f"{base}{n}.png") as r:
+                    if r.status != 200:
+                        raise web.HTTPNotFound()
+                    data = await r.content.read(512 * 1024)
+                png = await asyncio.to_thread(square_icon, data)
+            except web.HTTPException:
+                raise
+            except Exception as e:
+                log.warning("Icon %s: %s", n, e)
+                raise web.HTTPNotFound()
+            self.squares[n] = png
+            while len(self.squares) > 1000:
+                self.squares.popitem(last=False)
+        self.squares.move_to_end(n)
+        return web.Response(body=png, content_type="image/png",
+                            headers={"Cache-Control": "public, max-age=604800"})
+
+    def avatar_for(self, author: str) -> str:
+        icon = self.icons.get(author, ICON_DEFAULT)
+        if self.c.get("icon_public_url"):
+            return f"{self.c['icon_public_url'].rstrip('/')}/{icon}.png"
+        return f"{self.c.get('icon_url_base', 'http://hlwiki.com/ik0ns/')}{icon}.png"
+
     # ---- the Discord side ----
 
     async def on_message(self, msg: discord.Message) -> None:
@@ -370,8 +440,7 @@ class Bridge(discord.Client):
         payload = {"username": f"{author} [{source}]"[:80], "content": text[:2000],
                    "allowed_mentions": {"parse": [], "users": users[:100]}}
         if self.c.get("use_hotline_icons", True) and source == "Hotline":
-            base = self.c.get("icon_url_base", "http://hlwiki.com/ik0ns/")
-            payload["avatar_url"] = f"{base}{self.icons.get(author, ICON_DEFAULT)}.png"
+            payload["avatar_url"] = self.avatar_for(author)
         assert self.session
         for attempt in (1, 2):
             try:
