@@ -46,6 +46,9 @@ services:
     restart: unless-stopped
     volumes:
       - ./config.json:/config/config.json:ro
+    # A Hotline server on this same machine: "hotline_host": "host.docker.internal"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     logging:
       driver: json-file
       options:
