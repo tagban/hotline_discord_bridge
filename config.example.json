@@ -1,31 +1,32 @@
 {
-    "// SECTION": "DISCORD CONFIGURATION",
     "discord_token": "INSERT_BOT_TOKEN_HERE",
     "discord_channel_id": 0,
     "discord_guild_id": 0,
-    "discord_webhook_url": "https://discord.com/api/webhooks/...",
+    "discord_webhook_url": "INSERT_CHANNEL_WEBHOOK_URL_HERE",
     "discord_status": "online",
     "discord_activity_type": "watching",
     "discord_activity_name": "hotline://your-server-address",
-
-    "// SECTION": "HOTLINE CONFIGURATION",
-    "hotline_host": "0.0.0.0",
+    "hotline_host": "your-hotline-server.com",
     "hotline_port": 5500,
+    "hotline_login": "",
+    "hotline_password": "",
     "bridge_nickname": "Relay",
+    "hotline_icon": 128,
     "use_hotline_icons": true,
-	"hotline_icon": 5500,
     "icon_url_base": "http://hlwiki.com/ik0ns/",
-
-    "// SECTION": "WEB & SQL FEATURES (OPTIONAL)",
+    "translate_hotline_faces": true,
+    "filtered_words": [
+        "@here",
+        "@everyone"
+    ],
     "use_web_features": false,
+    "webhook_port": 54230,
+    "web_secret_key": "",
     "mysql_host": "localhost",
     "mysql_user": "root",
     "mysql_password": "",
     "mysql_db": "bridge_db",
-    "webhook_port": 54230,
-    "web_secret_key": "CREATE_A_RANDOM_STRING_HERE",
-
-    "// SECTION": "FILTERING & ADMINS",
-    "filtered_words": ["@here", "@everyone"],
-    "manual_admins": ["AdminName"]
+    "manual_admins": [
+        "AdminName"
+    ]
 }

@@ -1,0 +1,18 @@
+# The bridge: `docker compose up -d --build`, then `docker compose logs -f`.
+# config.json sits beside this file (copy config.example.json); it never goes in git.
+services:
+  hotline-discord-bridge:
+    build: .
+    image: hotline-discord-bridge:local
+    container_name: hotline-discord-bridge
+    restart: unless-stopped
+    volumes:
+      - ./config.json:/config/config.json:ro
+    # Only for the web monitor (use_web_features): the site posts chat to this port.
+    # ports:
+    #   - "127.0.0.1:54230:54230"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
