@@ -96,3 +96,15 @@ def test_faces_both_ways():
     assert hl_bridge.discord_text("hi :) see http://x.com :/ and <3") == "hi 🙂 see http://x.com 😕 and ❤️"
     assert hl_bridge.discord_text("a:b c:)d") == "a:b c:)d"
     assert hl_bridge.hotline_text("nice 👍 😂") == "nice (Y) XD"
+
+
+def test_our_names_leave_discord_py_alone():
+    """discord.Client keeps its own attributes (http, loop, ...): the bridge's must not replace them."""
+    import discord
+    c = {"discord_token": "x", "discord_channel_id": 1, "discord_webhook_url": "x", "hotline_host": "h"}
+    b = hl_bridge.Bridge(c)
+    assert isinstance(b.http, discord.http.HTTPClient)
+    plain = discord.Client(intents=discord.Intents.none())
+    ours = set(vars(b)) - set(vars(plain))
+    clash = {n for n in ours if hasattr(discord.Client, n)}
+    assert ours and not clash, clash

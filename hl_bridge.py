@@ -192,13 +192,13 @@ class Bridge(discord.Client):
         self.hl: hotline.Client | None = None
         self.icons: dict[str, int] = {}  # Hotline name -> icon
         self.outbox: deque = deque(maxlen=50)  # Discord -> Hotline while Hotline is down: (time, line)
-        self.http: aiohttp.ClientSession | None = None
+        self.session: aiohttp.ClientSession | None = None
         self.filtered = [w.lower() for w in c.get("filtered_words", [])]
 
     # ---- start-up: runs once, however often Discord reconnects ----
 
     async def setup_hook(self) -> None:
-        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
         await self.db.connect()
         if self.c.get("use_web_features"):
             app = web.Application()
@@ -234,8 +234,8 @@ class Bridge(discord.Client):
     async def close(self) -> None:
         if self.hl:
             await self.hl.close()
-        if self.http:
-            await self.http.close()
+        if self.session:
+            await self.session.close()
         await super().close()
 
     # ---- the Hotline side ----
@@ -372,10 +372,10 @@ class Bridge(discord.Client):
         if self.c.get("use_hotline_icons", True) and source == "Hotline":
             base = self.c.get("icon_url_base", "http://hlwiki.com/ik0ns/")
             payload["avatar_url"] = f"{base}{self.icons.get(author, ICON_DEFAULT)}.png"
-        assert self.http
+        assert self.session
         for attempt in (1, 2):
             try:
-                async with self.http.post(self.c["discord_webhook_url"], json=payload) as r:
+                async with self.session.post(self.c["discord_webhook_url"], json=payload) as r:
                     if r.status == 429:  # Discord's rate limit: wait as told, once
                         await asyncio.sleep(float((await r.json()).get("retry_after", 1)))
                         continue
