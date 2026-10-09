@@ -398,7 +398,7 @@ class Bridge(discord.Client):
     async def on_message(self, msg: discord.Message) -> None:
         if msg.author == self.user or msg.webhook_id or msg.channel.id != self.channel_id:
             return
-        content = msg.content + "".join(f" {a.url}" for a in msg.attachments)
+        content = msg.clean_content + "".join(f" {a.url}" for a in msg.attachments)
         if content.strip():
             await self.relay(msg.author.display_name, "Discord", content, ICON_DISCORD)
 

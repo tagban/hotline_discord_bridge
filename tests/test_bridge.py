@@ -125,3 +125,27 @@ def test_square_icons():
     # a banner keeps only its left end, centered: the top row is transparent padding
     im = Image.open(io.BytesIO(hl_bridge.square_icon(png(232, 18))))
     assert im.getpixel((64, 0))[3] == 0 and im.getpixel((64, 64))[3] == 255
+
+
+def test_discord_mentions_reach_hotline_as_names():
+    import discord
+
+    async def run():
+        c = {"discord_token": "x", "discord_channel_id": 1, "discord_webhook_url": "x", "hotline_host": "h"}
+        b = hl_bridge.Bridge(c)
+        relayed = []
+
+        async def relay(author, source, text, icon):
+            relayed.append((author, text))
+        b.relay = relay
+        user = {"id": "123456789012345678", "username": "alice", "discriminator": "0", "avatar": None}
+        msg = discord.Message(state=b._connection, channel=discord.Object(1), data={
+            "id": "2", "channel_id": "1", "type": 0, "content": "<@123456789012345678>  icons up.",
+            "author": {"id": "3", "username": "Tagban", "discriminator": "0", "avatar": None},
+            "mentions": [user], "attachments": [], "embeds": [], "pinned": False, "mention_everyone": False,
+            "tts": False, "timestamp": "2026-10-09T08:07:57+00:00", "edited_timestamp": None,
+        })
+        await b.on_message(msg)
+        assert relayed == [("Tagban", "@alice  icons up.")]
+
+    asyncio.run(run())
