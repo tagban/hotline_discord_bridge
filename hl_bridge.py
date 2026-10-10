@@ -218,6 +218,7 @@ class Bridge(discord.Client):
         self.session: aiohttp.ClientSession | None = None
         self.filtered = [w.lower() for w in c.get("filtered_words", [])]
         self.squares: OrderedDict[int, bytes] = OrderedDict()  # icon -> square PNG, most recent last
+        self.chat_tail: asyncio.Task | None = None  # the latest Hotline chat line on its way to Discord
 
     # ---- start-up: runs once, however often Discord reconnects ----
 
@@ -327,7 +328,18 @@ class Bridge(discord.Client):
 
     async def on_hotline(self, kind: str, d: dict) -> None:
         if kind == "chat":
-            await self.from_hotline_chat(d["text"])
+            # Not awaited: an image download needs the connection's reader, which is waiting
+            # on us. Each message still waits for the one before, so Discord gets them in order.
+            prev = self.chat_tail
+
+            async def post() -> None:
+                if prev:
+                    await asyncio.wait([prev])
+                try:
+                    await self.from_hotline_chat(d["text"], d.get("media"))
+                except Exception:
+                    log.exception("Hotline chat")
+            self.chat_tail = asyncio.create_task(post())
         elif kind == "user_changed":
             self.icons[d["name"]] = d.get("icon") or ICON_DEFAULT
             await self.db.seen(d["name"], "Hotline", self.icons[d["name"]])
@@ -335,7 +347,7 @@ class Bridge(discord.Client):
             self.hl.send_private(d["id"], f"I'm the relay between this chat and Discord. "
                                           f"Say something in the main chat and Discord will see it.")
 
-    async def from_hotline_chat(self, raw: str) -> None:
+    async def from_hotline_chat(self, raw: str, media: bytes | None = None) -> None:
         line = raw.lstrip("\r\n")
         m = CHAT_LINE.match(line)
         emote = False
@@ -345,15 +357,25 @@ class Bridge(discord.Client):
             if not m:
                 return  # a server notice
         who, text = m[1].strip(), m[2].strip()
-        if not text or who.lower() == self.nick.lower():
+        if who.lower() == self.nick.lower():
             return  # ourselves (including what we relayed from Discord)
         if any(w in text.lower() for w in self.filtered):
             return
+        image = None
+        if media and self.hl:
+            try:
+                image = await asyncio.wait_for(self.hl.download_media(media), 30)
+            except Exception as e:
+                log.warning("Hotline image: %s", e)
+        if image and text == "[image]":
+            text = ""  # the fallback for clients that can't show the image itself
+        if not text and not image:
+            return
         await self.db.seen(who, "Hotline", self.icons.get(who))
-        await self.db.said("Hotline", who, text)
+        await self.db.said("Hotline", who, text or "[image]")
         if self.c.get("translate_hotline_faces", True):
             text = discord_text(text)
-        await self.to_discord(who, "Hotline", f"*{text}*" if emote else text)
+        await self.to_discord(who, "Hotline", f"*{text}*" if emote and text else text, image)
 
     # ---- square icons, for Discord's avatars ----
 
@@ -427,7 +449,8 @@ class Bridge(discord.Client):
             else:
                 self.outbox.append((time.time(), line))
 
-    async def to_discord(self, author: str, source: str, text: str) -> None:
+    async def to_discord(self, author: str, source: str, text: str,
+                         image: tuple[bytes, str] | None = None) -> None:
         text = text.replace("@everyone", "everyone").replace("@here", "here")
         users = []
         if "@" in text:
@@ -443,8 +466,16 @@ class Bridge(discord.Client):
             payload["avatar_url"] = self.avatar_for(author)
         assert self.session
         for attempt in (1, 2):
+            if image:  # a form is spent once posted, so each attempt gets its own
+                body = aiohttp.FormData()
+                body.add_field("payload_json", json.dumps(payload), content_type="application/json")
+                body.add_field("files[0]", image[0], content_type=image[1] or "application/octet-stream",
+                               filename=f"image.{(image[1] or 'image/png').split('/')[-1]}")
+                kw = {"data": body}
+            else:
+                kw = {"json": payload}
             try:
-                async with self.session.post(self.c["discord_webhook_url"], json=payload) as r:
+                async with self.session.post(self.c["discord_webhook_url"], **kw) as r:
                     if r.status == 429:  # Discord's rate limit: wait as told, once
                         await asyncio.sleep(float((await r.json()).get("retry_after", 1)))
                         continue
