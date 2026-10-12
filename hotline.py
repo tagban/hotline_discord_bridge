@@ -53,6 +53,7 @@ class Tx:
     IM_ACK = 812
     IM_TYPING = 813
     GET_USER_INFO = 825
+    UPLOAD_MEDIA = 750
     DOWNLOAD_MEDIA = 751
 
 
@@ -76,9 +77,15 @@ class F:
     CHAT_MEDIA_TYPE = 0x0201
     CHAT_MEDIA_ID = 0x0202
     CHAT_MEDIA_PAYLOAD = 0x0203
+    CHAT_MEDIA_DECLARED_TYPE = 0x0204
+    CHAT_MEDIA_UPLOAD_TOKEN = 0x0208
     CHAT_MEDIA_PART_INDEX = 0x0209
     CHAT_MEDIA_PART_COUNT = 0x020A
     CHAT_MEDIA_PART_FINAL = 0x020B
+    CHAT_MEDIA_MAX_BYTES = 0x020C
+    CHAT_MEDIA_MAX_DIMENSION = 0x020D
+    CHAT_MEDIA_MAX_PIXELS = 0x020E
+    CHAT_MEDIA_CHUNK_SIZE = 0x020F
     HOPE_APP_ID = 0x0E01
     HOPE_APP_STRING = 0x0E02
     HOPE_SESSION_KEY = 0x0E03
@@ -510,6 +517,13 @@ class Client:
             raise HotlineError("Instant messaging isn't available on this server (or for this account).")
         self.utf8 = bool(caps & CAP_TEXT_ENCODING)
         self.max_message_bytes = reply.uint(F.MAX_MESSAGE_BYTES) or 4096
+        self.inline_media = bool(caps & CAP_INLINE_MEDIA)
+        # Image upload limits, the spec's defaults where the server gives none. A field's
+        # length is 16 bits, so no chunk can be longer than that.
+        self.media_max_bytes = reply.uint(F.CHAT_MEDIA_MAX_BYTES) or 256 * 1024
+        self.media_max_dimension = reply.uint(F.CHAT_MEDIA_MAX_DIMENSION) or 2048
+        self.media_max_pixels = reply.uint(F.CHAT_MEDIA_MAX_PIXELS) or 2048 * 2048
+        self.media_chunk = min(reply.uint(F.CHAT_MEDIA_CHUNK_SIZE) or 60000, 0xFFFF)
         self.server_name = self.dec(reply.get(F.SERVER_NAME)) or None
         self.wire = wire
         self.closed.clear()
@@ -680,10 +694,13 @@ class Client:
 
     # ---- classic chat ----
 
-    def send_chat(self, text: str, emote: bool = False) -> None:
+    def send_chat(self, text: str, emote: bool = False, media: tuple[bytes, str] | None = None) -> None:
+        """`media` is a handle and MIME type from upload_media; `text` is what clients without it see."""
         f = [(F.DATA, self.enc(text))]
         if emote:
             f.append(u16(F.CHAT_OPTIONS, 1))
+        if media:
+            f += [(F.CHAT_MEDIA_ID, media[0]), (F.CHAT_MEDIA_TYPE, self.enc(media[1]))]
         self.notify(Tx.SEND_CHAT, f)
 
     def send_private(self, user_id: int, text: str) -> None:
@@ -712,6 +729,29 @@ class Client:
             part += 1
             if r.uint(F.CHAT_MEDIA_PART_FINAL) or part >= (r.uint(F.CHAT_MEDIA_PART_COUNT) or 1):
                 return data, self.dec(r.get(F.CHAT_MEDIA_TYPE))
+
+    async def upload_media(self, data: bytes, mime: str) -> tuple[bytes, str]:
+        """Image bytes to a media handle for send_chat: handle, canonical MIME type."""
+        parts = [data[i:i + self.media_chunk] for i in range(0, len(data), self.media_chunk)] or [b""]
+        token = None
+        for i, part in enumerate(parts):
+            f = [(F.CHAT_MEDIA_PAYLOAD, part)]
+            if i == 0:
+                f.append((F.CHAT_MEDIA_DECLARED_TYPE, self.enc(mime)))
+                if len(parts) > 1:
+                    f.append(u16(F.CHAT_MEDIA_PART_COUNT, len(parts)))
+            elif token is None:
+                raise HotlineError("The server gave no upload token.")
+            else:
+                f += [(F.CHAT_MEDIA_UPLOAD_TOKEN, token), u16(F.CHAT_MEDIA_PART_INDEX, i)]
+            if i == len(parts) - 1:
+                f.append((F.CHAT_MEDIA_PART_FINAL, b"\x01"))
+            r = await self.request(Tx.UPLOAD_MEDIA, f)
+            token = r.get(F.CHAT_MEDIA_UPLOAD_TOKEN) or token
+        handle = r.get(F.CHAT_MEDIA_ID)
+        if not handle:
+            raise HotlineError("The server gave no media handle.")
+        return handle, self.dec(r.get(F.CHAT_MEDIA_TYPE))
 
     async def close(self) -> None:
         if self.wire is not None:
