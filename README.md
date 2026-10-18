@@ -4,8 +4,9 @@ Relays one Hotline server's public chat and one Discord channel, both ways:
 
 - **Hotline → Discord** through the channel's webhook, as the speaker (`Name [Hotline]`)
   with their Hotline icon as the picture (from the hlwiki icon set).
-- **Images:** a picture posted in Hotline chat (servers with the inline media extension)
-  arrives on Discord as an image, not as `[image]`.
+- **Images:** on servers with the inline media extension, a picture posted in Hotline chat
+  arrives on Discord as an image, not as `[image]`. A Discord image within the server's
+  limits goes the other way as an inline image, with its link for clients that can't show it.
 - **Discord → Hotline** as chat lines: `Discord | Name: message`.
 - **Emoticons:** Discord's emoji become the old ASCII faces Hotline can show (😀 `:D`,
   😂 `XD`, 👍 `(Y)`); custom Discord emoji become image links; Hotline's faces show as

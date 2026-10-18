@@ -135,7 +135,7 @@ def test_discord_mentions_reach_hotline_as_names():
         b = hl_bridge.Bridge(c)
         relayed = []
 
-        async def relay(author, source, text, icon):
+        async def relay(author, source, text, icon, attachments=()):
             relayed.append((author, text))
         b.relay = relay
         user = {"id": "123456789012345678", "username": "alice", "discriminator": "0", "avatar": None}
@@ -170,7 +170,7 @@ def test_discord_names_hotline_cannot_show_and_pings_it_must_still_drop():
         b = hl_bridge.Bridge(c)
         sent = []
         b.hl = type("H", (), {"closed": type("E", (), {"is_set": staticmethod(lambda: False)})(),
-                              "send_chat": lambda self, line: sent.append(line)})()
+                              "send_chat": lambda self, line, media=None: sent.append(line)})()
 
         # A nickname with no ASCII in it would strip to "@": use the account handle instead.
         yuki = {"id": "123456789012345678", "username": "yuki", "global_name": "\u3086\u304d",
@@ -186,43 +186,68 @@ def test_discord_names_hotline_cannot_show_and_pings_it_must_still_drop():
     asyncio.run(run())
 
 
-def test_hotline_images_reach_discord():
-    """A capable client gets the media handle on chat 106 and fetches the bytes with 751, in chunks."""
+def media_server(sent: list, chats=(), chunk=None):
+    """A Hotline server with inline media: it sends `chats` (each with handle h1) after login,
+    serves h1 as b"PNG-BYTES" in two parts, and keeps the uploads and chat it gets in `sent`."""
     import hotline
     from hotline import F, Transaction, Tx
+    uploads = {}
 
-    async def run():
-        async def serve(r, w):
-            assert await r.readexactly(12) == b"TRTPHOTL\x00\x01\x00\x00"
-            w.write(b"TRTP\0\0\0\0")
-            wire = hotline.Wire(r, w)
-            while True:
-                t = await wire.read()
-                reply = Transaction(t.ty, id=t.id, is_reply=True)
-                if t.ty == Tx.LOGIN:
-                    reply.fields = [hotline.u16(F.CAPABILITIES, hotline.CAP_TEXT_ENCODING | hotline.CAP_INLINE_MEDIA)]
-                    await wire.write(reply)
-                    for text in ("\r          Pat:  [image]", "\r          Pat:  look"):
-                        await wire.write(Transaction(Tx.CHAT_MSG, [(F.DATA, text.encode()), (F.CHAT_MEDIA_ID, b"h1"),
-                                                                    (F.CHAT_MEDIA_TYPE, b"image/png")]))
-                elif t.ty == Tx.DOWNLOAD_MEDIA:
-                    part = t.uint(F.CHAT_MEDIA_PART_INDEX) or 0
-                    reply.fields = [(F.CHAT_MEDIA_PAYLOAD, [b"PNG-", b"BYTES"][part]), (F.CHAT_MEDIA_TYPE, b"image/png"),
-                                    hotline.u16(F.CHAT_MEDIA_PART_COUNT, 2)]
-                    await wire.write(reply)
+    async def serve(r, w):
+        assert await r.readexactly(12) == b"TRTPHOTL\x00\x01\x00\x00"
+        w.write(b"TRTP\0\0\0\0")
+        wire = hotline.Wire(r, w)
+        while True:
+            t = await wire.read()
+            reply = Transaction(t.ty, id=t.id, is_reply=True)
+            if t.ty == Tx.LOGIN:
+                reply.fields = [hotline.u16(F.CAPABILITIES, hotline.CAP_TEXT_ENCODING | hotline.CAP_INLINE_MEDIA),
+                                (F.CHAT_MEDIA_MAX_BYTES, (100).to_bytes(4, "big"))]
+                if chunk:
+                    reply.fields.append((F.CHAT_MEDIA_CHUNK_SIZE, chunk.to_bytes(4, "big")))
+            elif t.ty == Tx.DOWNLOAD_MEDIA:
+                part = t.uint(F.CHAT_MEDIA_PART_INDEX) or 0
+                reply.fields = [(F.CHAT_MEDIA_PAYLOAD, [b"PNG-", b"BYTES"][part]), (F.CHAT_MEDIA_TYPE, b"image/png"),
+                                hotline.u16(F.CHAT_MEDIA_PART_COUNT, 2)]
+            elif t.ty == Tx.UPLOAD_MEDIA:
+                token = t.get(F.CHAT_MEDIA_UPLOAD_TOKEN)
+                if token:
+                    assert t.uint(F.CHAT_MEDIA_PART_INDEX) == len(uploads[token]) // chunk
                 else:
-                    await wire.write(reply)
+                    token = b"t%d" % len(uploads)
+                    assert t.uint(F.CHAT_MEDIA_PART_COUNT) or t.uint(F.CHAT_MEDIA_PART_FINAL)
+                uploads[token] = uploads.get(token, b"") + t.get(F.CHAT_MEDIA_PAYLOAD)
+                reply.fields = [(F.CHAT_MEDIA_UPLOAD_TOKEN, token)]
+                if t.uint(F.CHAT_MEDIA_PART_FINAL):
+                    sent.append(("upload", uploads.pop(token)))
+                    reply.fields = [(F.CHAT_MEDIA_ID, b"up1"), (F.CHAT_MEDIA_TYPE, b"image/png")]
+            elif t.ty == Tx.SEND_CHAT:
+                sent.append(("chat", t.get(F.DATA).decode(), t.get(F.CHAT_MEDIA_ID)))
+            await wire.write(reply)
+            if t.ty == Tx.LOGIN:
+                for text in chats:
+                    await wire.write(Transaction(Tx.CHAT_MSG, [(F.DATA, text.encode()), (F.CHAT_MEDIA_ID, b"h1"),
+                                                                (F.CHAT_MEDIA_TYPE, b"image/png")]))
+    return asyncio.start_server(serve, "127.0.0.1", 0)
 
-        server = await asyncio.start_server(serve, "127.0.0.1", 0)
-        c = {"discord_token": "x", "discord_channel_id": 1, "discord_webhook_url": "x", "hotline_host": "127.0.0.1",
-             "hotline_port": server.sockets[0].getsockname()[1]}
-        b = hl_bridge.Bridge(c)
+
+async def bridge_on(server, posted: list) -> tuple:
+    c = {"discord_token": "x", "discord_channel_id": 1, "discord_webhook_url": "x", "hotline_host": "127.0.0.1",
+         "hotline_port": server.sockets[0].getsockname()[1]}
+    b = hl_bridge.Bridge(c)
+
+    async def to_discord(author, source, text, image=None):
+        posted.append((author, text, image))
+    b.to_discord = to_discord
+    return b, asyncio.create_task(b.hotline_forever())
+
+
+def test_hotline_images_reach_discord():
+    """A capable client gets the media handle on chat 106 and fetches the bytes with 751, in chunks."""
+    async def run():
         posted = []
-
-        async def to_discord(author, source, text, image=None):
-            posted.append((author, text, image))
-        b.to_discord = to_discord
-        task = asyncio.create_task(b.hotline_forever())
+        server = await media_server([], chats=("\r          Pat:  [image]", "\r          Pat:  look"))
+        b, task = await bridge_on(server, posted)
         for _ in range(100):
             if len(posted) == 2:
                 break
@@ -230,5 +255,43 @@ def test_hotline_images_reach_discord():
         task.cancel()
         server.close()
         assert posted == [("Pat", "", (b"PNG-BYTES", "image/png")), ("Pat", "look", (b"PNG-BYTES", "image/png"))]
+
+    asyncio.run(run())
+
+
+def test_discord_images_reach_hotline():
+    """An image within the server's limits is uploaded with 750, in chunks, and sent with its link as
+    the text; one over the limit, or a file that isn't an image, goes as a link only."""
+    class Attachment:
+        def __init__(self, url, data, content_type="image/png"):
+            self.url, self.data, self.content_type, self.size = url, data, content_type, len(data)
+            self.width = self.height = 16
+
+        def is_spoiler(self):
+            return False
+
+        async def read(self):
+            return self.data
+
+    async def run():
+        sent = []
+        server = await media_server(sent, chunk=4)
+        b, task = await bridge_on(server, [])
+        for _ in range(100):
+            if b.hl:
+                break
+            await asyncio.sleep(0.05)
+        await b.relay("Sam", "Discord", "look", 134, [
+            Attachment("https://cdn/a.png", b"0123456789"), Attachment("https://cdn/big.png", b"x" * 101),
+            Attachment("https://cdn/notes.txt", b"hi", "text/plain")])
+        for _ in range(100):
+            if len(sent) == 3:
+                break
+            await asyncio.sleep(0.05)
+        task.cancel()
+        server.close()
+        assert sent == [("upload", b"0123456789"),
+                        ("chat", "Discord | Sam: look https://cdn/big.png https://cdn/notes.txt", None),
+                        ("chat", "Discord | Sam: https://cdn/a.png", b"up1")]
 
     asyncio.run(run())

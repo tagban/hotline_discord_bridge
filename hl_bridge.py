@@ -235,6 +235,7 @@ class Bridge(discord.Client):
         self.filtered = [w.lower() for w in c.get("filtered_words", [])]
         self.squares: OrderedDict[int, bytes] = OrderedDict()  # icon -> square PNG, most recent last
         self.chat_tail: asyncio.Task | None = None  # the latest Hotline chat line on its way to Discord
+        self.hotline_lock = asyncio.Lock()  # an image upload is slow: later messages wait their turn
 
     # ---- start-up: runs once, however often Discord reconnects ----
 
@@ -436,9 +437,9 @@ class Bridge(discord.Client):
     async def on_message(self, msg: discord.Message) -> None:
         if msg.author == self.user or msg.webhook_id or msg.channel.id != self.channel_id:
             return
-        content = discord_message_text(msg) + "".join(f" {a.url}" for a in msg.attachments)
-        if content.strip():
-            await self.relay(msg.author.display_name, "Discord", content, ICON_DISCORD)
+        text = discord_message_text(msg)
+        if text.strip() or msg.attachments:
+            await self.relay(msg.author.display_name, "Discord", text, ICON_DISCORD, msg.attachments)
 
     async def web_chat(self, request: web.Request) -> web.Response:
         if not self.c.get("web_secret_key") or request.headers.get("X-Bridge-Key") != self.c["web_secret_key"]:
@@ -447,23 +448,50 @@ class Bridge(discord.Client):
         await self.relay(str(data.get("author", "Web"))[:40], "Web", str(data.get("message", ""))[:1000], ICON_WEB)
         return web.Response(text="OK")
 
-    async def relay(self, author: str, source: str, text: str, icon: int) -> None:
-        """From Discord or the web: to Hotline (and, from the web, to Discord too)."""
-        if any(w in text.lower() for w in self.filtered):
+    async def relay(self, author: str, source: str, text: str, icon: int, attachments: list = ()) -> None:
+        """From Discord or the web: to Hotline (and, from the web, to Discord too). An image
+        attachment the Hotline server can take goes as an inline image, with its link as the
+        text for clients that can't show it; any other attachment, as its link."""
+        full = text + "".join(f" {a.url}" for a in attachments)
+        if any(w in full.lower() for w in self.filtered):
             return
         await self.db.seen(author, source, icon)
-        await self.db.said(source, author, text)
+        await self.db.said(source, author, full)
         if source != "Discord":
-            await self.to_discord(author, source, text)
-        safe = hotline_text(text)
-        if not safe.strip():
-            return
-        for line in hotline_lines(f"{source} | {author}: ", safe):
-            if self.hl and not self.hl.closed.is_set():
-                self.hl.send_chat(line)
-                await asyncio.sleep(0.3)  # keep Hotline's flood protection happy
-            else:
-                self.outbox.append((time.time(), line))
+            await self.to_discord(author, source, full)
+        async with self.hotline_lock:
+            hl, images = self.hl, {}
+            for a in attachments:
+                if not self.fits_hotline(hl, a):
+                    continue
+                try:
+                    images[a.url] = await asyncio.wait_for(hl.upload_media(await a.read(), a.content_type), 30)
+                except Exception as e:
+                    # One upload per account every few seconds: the rest would be refused too.
+                    log.warning("Image to Hotline: %s", e)
+                    break
+            prefix = f"{source} | {author}: "
+            out = [(line, None) for line in hotline_lines(prefix, hotline_text(
+                text + "".join(f" {a.url}" for a in attachments if a.url not in images)))]
+            for url, media in images.items():
+                out += [(line, media if i == 0 else None) for i, line in enumerate(hotline_lines(prefix, url))]
+            for line, media in out:
+                if self.hl and not self.hl.closed.is_set():
+                    # A handle belongs to the session that uploaded it; on another, the server drops the line.
+                    self.hl.send_chat(line, media=media if self.hl is hl else None)
+                    await asyncio.sleep(0.3)  # keep Hotline's flood protection happy
+                else:
+                    self.outbox.append((time.time(), line))
+
+    @staticmethod
+    def fits_hotline(hl: hotline.Client | None, a: discord.Attachment) -> bool:
+        """Whether the server takes images, and this one is a kind it keeps (any other is refused,
+        but still spends the account's upload allowance) within its limits."""
+        if not (hl and hl.inline_media and not a.is_spoiler()
+                and (a.content_type or "").split(";")[0] in ("image/png", "image/jpeg", "image/gif")):
+            return False
+        w, h = a.width or 0, a.height or 0
+        return a.size <= hl.media_max_bytes and max(w, h) <= hl.media_max_dimension and w * h <= hl.media_max_pixels
 
     async def to_discord(self, author: str, source: str, text: str,
                          image: tuple[bytes, str] | None = None) -> None:
