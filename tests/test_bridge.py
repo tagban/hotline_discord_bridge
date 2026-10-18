@@ -147,6 +147,10 @@ def test_discord_mentions_reach_hotline_as_names():
         })
         await b.on_message(msg)
         assert relayed == [("Tagban", "@alice  icons up.")]
+
+    asyncio.run(run())
+
+
 def test_hotline_images_reach_discord():
     """A capable client gets the media handle on chat 106 and fetches the bytes with 751, in chunks."""
     import hotline
