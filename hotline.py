@@ -53,6 +53,7 @@ class Tx:
     IM_ACK = 812
     IM_TYPING = 813
     GET_USER_INFO = 825
+    DOWNLOAD_MEDIA = 751
 
 
 class F:
@@ -72,6 +73,12 @@ class F:
     VERSION = 160
     SERVER_NAME = 162
     CAPABILITIES = 0x01F0
+    CHAT_MEDIA_TYPE = 0x0201
+    CHAT_MEDIA_ID = 0x0202
+    CHAT_MEDIA_PAYLOAD = 0x0203
+    CHAT_MEDIA_PART_INDEX = 0x0209
+    CHAT_MEDIA_PART_COUNT = 0x020A
+    CHAT_MEDIA_PART_FINAL = 0x020B
     HOPE_APP_ID = 0x0E01
     HOPE_APP_STRING = 0x0E02
     HOPE_SESSION_KEY = 0x0E03
@@ -95,6 +102,7 @@ class F:
 
 
 CAP_TEXT_ENCODING = 1 << 1
+CAP_INLINE_MEDIA = 1 << 3
 CAP_MESSAGING = 1 << 6
 CAP_MESSENGER_SESSION = 1 << 8
 
@@ -421,7 +429,7 @@ class Client:
             u16(F.USER_ICON_ID, self.icon),
             # A classic session claims 1.9, which every server knows and still sends the agreement.
             u16(F.VERSION, 190 if self.classic else self.VERSION),
-            u16(F.CAPABILITIES, CAP_TEXT_ENCODING if self.classic else
+            u16(F.CAPABILITIES, CAP_TEXT_ENCODING | CAP_INLINE_MEDIA if self.classic else
                 CAP_MESSAGING | CAP_MESSENGER_SESSION | CAP_TEXT_ENCODING),
         ]
 
@@ -578,7 +586,8 @@ class Client:
             else:
                 await self._emit("server_message", {"text": s(F.DATA)})
         elif t.ty == Tx.CHAT_MSG:
-            await self._emit("chat", {"text": s(F.DATA), "chat_id": t.uint(F.CHAT_ID)})
+            media = t.get(F.CHAT_MEDIA_ID) if t.get(F.CHAT_MEDIA_TYPE) is not None else None
+            await self._emit("chat", {"text": s(F.DATA), "chat_id": t.uint(F.CHAT_ID), "media": media})
         elif t.ty == Tx.NOTIFY_CHANGE_USER:
             uid = t.uint(F.USER_ID)
             if uid is not None:
@@ -690,6 +699,19 @@ class Client:
                 self.users[uid] = self.dec(d[8:8 + ln]).strip()
                 self.icons[uid] = icon
         return self.users
+
+    async def download_media(self, handle: bytes) -> tuple[bytes, str]:
+        """The image behind a chat message's media handle (inline media extension): bytes, MIME type."""
+        data, part = b"", 0
+        while True:
+            f = [(F.CHAT_MEDIA_ID, handle)] + ([u16(F.CHAT_MEDIA_PART_INDEX, part)] if part else [])
+            r = await self.request(Tx.DOWNLOAD_MEDIA, f)
+            data += r.get(F.CHAT_MEDIA_PAYLOAD) or b""
+            if len(data) > MAX_READ:
+                raise HotlineError("Image too large.")
+            part += 1
+            if r.uint(F.CHAT_MEDIA_PART_FINAL) or part >= (r.uint(F.CHAT_MEDIA_PART_COUNT) or 1):
+                return data, self.dec(r.get(F.CHAT_MEDIA_TYPE))
 
     async def close(self) -> None:
         if self.wire is not None:
