@@ -43,7 +43,7 @@ def test_relay_both_ways_and_reconnect(mock):
         b = hl_bridge.Bridge(c)
         posted = []
 
-        async def to_discord(author, source, text):
+        async def to_discord(author, source, text, image=None):
             posted.append((author, source, text))
         b.to_discord = to_discord
         task = asyncio.create_task(b.hotline_forever())
@@ -125,3 +125,51 @@ def test_square_icons():
     # a banner keeps only its left end, centered: the top row is transparent padding
     im = Image.open(io.BytesIO(hl_bridge.square_icon(png(232, 18))))
     assert im.getpixel((64, 0))[3] == 0 and im.getpixel((64, 64))[3] == 255
+
+
+def test_hotline_images_reach_discord():
+    """A capable client gets the media handle on chat 106 and fetches the bytes with 751, in chunks."""
+    import hotline
+    from hotline import F, Transaction, Tx
+
+    async def run():
+        async def serve(r, w):
+            assert await r.readexactly(12) == b"TRTPHOTL\x00\x01\x00\x00"
+            w.write(b"TRTP\0\0\0\0")
+            wire = hotline.Wire(r, w)
+            while True:
+                t = await wire.read()
+                reply = Transaction(t.ty, id=t.id, is_reply=True)
+                if t.ty == Tx.LOGIN:
+                    reply.fields = [hotline.u16(F.CAPABILITIES, hotline.CAP_TEXT_ENCODING | hotline.CAP_INLINE_MEDIA)]
+                    await wire.write(reply)
+                    for text in ("\r          Pat:  [image]", "\r          Pat:  look"):
+                        await wire.write(Transaction(Tx.CHAT_MSG, [(F.DATA, text.encode()), (F.CHAT_MEDIA_ID, b"h1"),
+                                                                    (F.CHAT_MEDIA_TYPE, b"image/png")]))
+                elif t.ty == Tx.DOWNLOAD_MEDIA:
+                    part = t.uint(F.CHAT_MEDIA_PART_INDEX) or 0
+                    reply.fields = [(F.CHAT_MEDIA_PAYLOAD, [b"PNG-", b"BYTES"][part]), (F.CHAT_MEDIA_TYPE, b"image/png"),
+                                    hotline.u16(F.CHAT_MEDIA_PART_COUNT, 2)]
+                    await wire.write(reply)
+                else:
+                    await wire.write(reply)
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        c = {"discord_token": "x", "discord_channel_id": 1, "discord_webhook_url": "x", "hotline_host": "127.0.0.1",
+             "hotline_port": server.sockets[0].getsockname()[1]}
+        b = hl_bridge.Bridge(c)
+        posted = []
+
+        async def to_discord(author, source, text, image=None):
+            posted.append((author, text, image))
+        b.to_discord = to_discord
+        task = asyncio.create_task(b.hotline_forever())
+        for _ in range(100):
+            if len(posted) == 2:
+                break
+            await asyncio.sleep(0.05)
+        task.cancel()
+        server.close()
+        assert posted == [("Pat", "", (b"PNG-BYTES", "image/png")), ("Pat", "look", (b"PNG-BYTES", "image/png"))]
+
+    asyncio.run(run())
