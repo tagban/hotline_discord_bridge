@@ -295,3 +295,90 @@ def test_discord_images_reach_hotline():
                         ("chat", "Discord | Sam: https://cdn/a.png", b"up1")]
 
     asyncio.run(run())
+
+
+class FakeHotline:
+    """Enough of hotline.Client for relay(): it takes images and records what it is sent."""
+
+    def __init__(self):
+        self.inline_media = True
+        self.media_max_bytes, self.media_max_dimension, self.media_max_pixels = 10 ** 6, 2048, 2048 * 2048
+        self.closed = asyncio.Event()
+        self.sent: list = []
+        self.uploads = 0
+
+    def send_chat(self, text, emote=False, media=None):
+        self.sent.append((text, media))
+
+    async def upload_media(self, data, mime):
+        self.uploads += 1
+        return b"up%d" % self.uploads
+
+
+class Img:
+    def __init__(self, url, data=b"png", content_type="image/png", width=16, height=16, read=None):
+        self.url, self.data, self.content_type, self.size = url, data, content_type, len(data)
+        self.width, self.height, self._read = width, height, read
+
+    def is_spoiler(self):
+        return False
+
+    async def read(self):
+        if self._read:
+            await self._read()
+        return self.data
+
+
+def bridge_with(hl, **extra):
+    b = hl_bridge.Bridge({"discord_token": "x", "discord_channel_id": 1, "discord_webhook_url": "x",
+                          "hotline_host": "h", **extra})
+    b.hl = hl
+    return b
+
+
+def test_one_discord_message_is_one_flood_budget():
+    """hotline_lines caps each block it is given; ten images used to mean ten uncapped extra lines."""
+    async def run():
+        hl = FakeHotline()
+        b = bridge_with(hl)
+        images = [Img(f"https://cdn/{i}.png") for i in range(10)]
+        await b.relay("Sam", "Discord", "a long caption " * 20, 134, images)
+        assert len(hl.sent) <= 6, f"{len(hl.sent)} chat lines for one message"
+        assert hl.sent[-1][0].endswith("(message cut short)")
+
+    asyncio.run(run())
+
+
+def test_a_slow_cdn_does_not_hold_up_the_room():
+    """The Discord read happens before the Hotline lock, so one stalled image cannot stop the chat."""
+    async def run():
+        hl = FakeHotline()
+        b = bridge_with(hl)
+        stuck, reading = asyncio.Event(), asyncio.Event()
+
+        async def hang():
+            reading.set()
+            await stuck.wait()
+
+        first = asyncio.create_task(b.relay("Sam", "Discord", "photo", 134,
+                                            [Img("https://cdn/slow.png", read=hang)]))
+        await reading.wait()                      # the image fetch is now in progress
+        await b.relay("Pat", "Discord", "urgent", 134)   # must not wait behind it
+        assert [t for t, _ in hl.sent] == ["Discord | Pat: urgent"]
+        stuck.set()
+        await first
+        assert any("slow.png" in t for t, _ in hl.sent)
+
+    asyncio.run(run())
+
+
+def test_a_mislabelled_or_prelogin_attachment_goes_as_a_link():
+    """Discord sizes real images; and before login the client offers no media at all."""
+    import hotline
+
+    hl = FakeHotline()
+    assert hl_bridge.Bridge.fits_hotline(hl, Img("https://cdn/a.png")) is True
+    # A .exe that Discord labelled image/png carries no dimensions.
+    assert hl_bridge.Bridge.fits_hotline(hl, Img("https://cdn/x.png", width=None, height=None)) is False
+    fresh = hotline.Client("h", 5500, "guest", "", nickname="Relay")
+    assert hl_bridge.Bridge.fits_hotline(fresh, Img("https://cdn/a.png")) is False

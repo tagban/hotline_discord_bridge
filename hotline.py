@@ -380,6 +380,12 @@ class Client:
         self.user_id = 0
         self.utf8 = True
         self.max_message_bytes = 4096
+        # The login reply fills these in; until then nothing is offered an inline image.
+        self.inline_media = False
+        self.media_max_bytes = 0
+        self.media_max_dimension = 0
+        self.media_max_pixels = 0
+        self.media_chunk = 60000
         self.server_name: str | None = None
         self.transport = ""
         self.wire: Wire | None = None

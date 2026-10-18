@@ -459,13 +459,26 @@ class Bridge(discord.Client):
         await self.db.said(source, author, full)
         if source != "Discord":
             await self.to_discord(author, source, full)
+        # Fetch from Discord before taking the lock: the CDN read is the slow part, and aiohttp's
+        # own ceiling for it is five minutes. Holding the lock through that stops every other
+        # message. Both awaits go inside the wait_for, or the timeout arms only once the read ends.
+        fetched = []
+        for a in attachments:
+            if not self.fits_hotline(self.hl, a):
+                continue
+            try:
+                fetched.append((a, await asyncio.wait_for(a.read(), 20),
+                                (a.content_type or "").split(";")[0]))
+            except Exception as e:
+                log.warning("Image from Discord: %s", e)
+                break
         async with self.hotline_lock:
             hl, images = self.hl, {}
-            for a in attachments:
-                if not self.fits_hotline(hl, a):
+            for a, data, mime in fetched:
+                if not self.fits_hotline(hl, a):  # the session may have changed while we fetched
                     continue
                 try:
-                    images[a.url] = await asyncio.wait_for(hl.upload_media(await a.read(), a.content_type), 30)
+                    images[a.url] = await asyncio.wait_for(hl.upload_media(data, mime), 30)
                 except Exception as e:
                     # One upload per account every few seconds: the rest would be refused too.
                     log.warning("Image to Hotline: %s", e)
@@ -475,6 +488,8 @@ class Bridge(discord.Client):
                 text + "".join(f" {a.url}" for a in attachments if a.url not in images)))]
             for url, media in images.items():
                 out += [(line, media if i == 0 else None) for i, line in enumerate(hotline_lines(prefix, url))]
+            if len(out) > 6:  # hotline_lines caps each block; one message still gets one flood budget
+                out = out[:5] + [(prefix + "(message cut short)", None)]
             for line, media in out:
                 if self.hl and not self.hl.closed.is_set():
                     # A handle belongs to the session that uploaded it; on another, the server drops the line.
@@ -491,6 +506,8 @@ class Bridge(discord.Client):
                 and (a.content_type or "").split(";")[0] in ("image/png", "image/jpeg", "image/gif")):
             return False
         w, h = a.width or 0, a.height or 0
+        if not (w and h):  # Discord sizes real images; without that this is something else mislabelled
+            return False
         return a.size <= hl.media_max_bytes and max(w, h) <= hl.media_max_dimension and w * h <= hl.media_max_pixels
 
     async def to_discord(self, author: str, source: str, text: str,
