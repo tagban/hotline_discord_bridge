@@ -127,6 +127,22 @@ def hotline_text(text: str) -> str:
     return text.encode("ascii", "ignore").decode("ascii")
 
 
+def discord_message_text(msg) -> str:
+    """A Discord message as Hotline should see it: mentions by name, no zero-width escapes.
+
+    clean_content turns <@id> into @nickname, but it also hides @everyone behind a
+    zero-width space. hotline_text() strips that character anyway, so leaving it in
+    changes nothing on Hotline and makes filtered_words miss. A nickname with no ASCII
+    in it would strip down to a bare "@", so those fall back to the account handle.
+    """
+    text = msg.clean_content.replace("\u200b", "")
+    for user in msg.mentions:
+        nick = user.display_name
+        if nick and not hotline_text(nick).strip():
+            text = text.replace(f"@{nick}", f"@{user.name}")
+    return text
+
+
 def hotline_lines(prefix: str, text: str) -> list[str]:
     """One message as Hotline chat lines, each short enough for every client."""
     out = []
@@ -420,7 +436,7 @@ class Bridge(discord.Client):
     async def on_message(self, msg: discord.Message) -> None:
         if msg.author == self.user or msg.webhook_id or msg.channel.id != self.channel_id:
             return
-        content = msg.clean_content + "".join(f" {a.url}" for a in msg.attachments)
+        content = discord_message_text(msg) + "".join(f" {a.url}" for a in msg.attachments)
         if content.strip():
             await self.relay(msg.author.display_name, "Discord", content, ICON_DISCORD)
 

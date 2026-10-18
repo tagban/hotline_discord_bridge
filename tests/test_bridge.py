@@ -151,6 +151,41 @@ def test_discord_mentions_reach_hotline_as_names():
     asyncio.run(run())
 
 
+def test_discord_names_hotline_cannot_show_and_pings_it_must_still_drop():
+    """clean_content hides @everyone behind a zero-width space and can leave a bare "@"."""
+    import discord
+
+    def message(b, content, mentions=()):
+        return discord.Message(state=b._connection, channel=discord.Object(1), data={
+            "id": "2", "channel_id": "1", "type": 0, "content": content,
+            "author": {"id": "3", "username": "Tagban", "discriminator": "0", "avatar": None},
+            "mentions": list(mentions), "attachments": [], "embeds": [], "pinned": False,
+            "mention_everyone": False, "tts": False,
+            "timestamp": "2026-10-09T08:07:57+00:00", "edited_timestamp": None,
+        })
+
+    async def run():
+        c = {"discord_token": "x", "discord_channel_id": 1, "discord_webhook_url": "x",
+             "hotline_host": "h", "filtered_words": ["@here", "@everyone"]}
+        b = hl_bridge.Bridge(c)
+        sent = []
+        b.hl = type("H", (), {"closed": type("E", (), {"is_set": staticmethod(lambda: False)})(),
+                              "send_chat": lambda self, line: sent.append(line)})()
+
+        # A nickname with no ASCII in it would strip to "@": use the account handle instead.
+        yuki = {"id": "123456789012345678", "username": "yuki", "global_name": "\u3086\u304d",
+                "discriminator": "0", "avatar": None}
+        await b.on_message(message(b, "<@123456789012345678> ping", [yuki]))
+        assert sent == ["Discord | Tagban: @yuki ping"]
+
+        # filtered_words still catches a ping, despite clean_content's zero-width escape.
+        sent.clear()
+        await b.on_message(message(b, "@everyone raid the hotline server"))
+        assert sent == []
+
+    asyncio.run(run())
+
+
 def test_hotline_images_reach_discord():
     """A capable client gets the media handle on chat 106 and fetches the bytes with 751, in chunks."""
     import hotline
