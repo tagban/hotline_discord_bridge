@@ -130,6 +130,11 @@ def hotline_image(data: bytes, mime: str, w: int, h: int,
     """
     if len(data) <= max_bytes and max(w, h) <= max_dim and w * h <= max_pixels:
         return data, mime
+    # A server may re-encode what we send and apply its own ceiling to the result, so a
+    # detailed image squeezed under the limit at full size can still come back refused.
+    # Aim well under it, and give up pixels before quality: fewer pixels shrink the
+    # server's copy too, where a lower quality setting of ours does not.
+    budget = max_bytes * 4 // 5
     from PIL import Image
     try:
         im = Image.open(io.BytesIO(data))
@@ -138,19 +143,20 @@ def hotline_image(data: bytes, mime: str, w: int, h: int,
         im.load()
     except Exception:
         return None  # whatever Discord called it, this is not an image we can read
-    scale = min(max_dim / max(im.width, im.height), (max_pixels / (im.width * im.height)) ** 0.5, 1.0)
+    scale = min(max_dim / max(im.width, im.height), (max_pixels / (im.width * im.height)) ** 0.5,
+                (1_200_000 / (im.width * im.height)) ** 0.5, 1.0)
     if scale < 1.0:
         im = im.resize((max(1, int(im.width * scale)), max(1, int(im.height * scale))), Image.LANCZOS)
     for _ in range(4):
         if mime == "image/png":  # flat colour and text stay sharper lossless, and often fit
             out = io.BytesIO()
             im.convert("RGBA").save(out, "PNG", optimize=True)
-            if out.tell() <= max_bytes:
+            if out.tell() <= budget:
                 return out.getvalue(), "image/png"
         for quality in (85, 70, 55, 40):
             out = io.BytesIO()
             im.convert("RGB").save(out, "JPEG", quality=quality, optimize=True)
-            if out.tell() <= max_bytes:
+            if out.tell() <= budget:
                 return out.getvalue(), "image/jpeg"
         if im.width * 2 // 3 < 160:  # smaller than this is not worth showing
             break
