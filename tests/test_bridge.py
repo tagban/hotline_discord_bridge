@@ -186,7 +186,7 @@ def test_discord_names_hotline_cannot_show_and_pings_it_must_still_drop():
     asyncio.run(run())
 
 
-def media_server(sent: list, chats=(), chunk=None):
+def media_server(sent: list, chats=(), chunk=None, max_bytes=100):
     """A Hotline server with inline media: it sends `chats` (each with handle h1) after login,
     serves h1 as b"PNG-BYTES" in two parts, and keeps the uploads and chat it gets in `sent`."""
     import hotline
@@ -202,7 +202,7 @@ def media_server(sent: list, chats=(), chunk=None):
             reply = Transaction(t.ty, id=t.id, is_reply=True)
             if t.ty == Tx.LOGIN:
                 reply.fields = [hotline.u16(F.CAPABILITIES, hotline.CAP_TEXT_ENCODING | hotline.CAP_INLINE_MEDIA),
-                                (F.CHAT_MEDIA_MAX_BYTES, (100).to_bytes(4, "big"))]
+                                (F.CHAT_MEDIA_MAX_BYTES, max_bytes.to_bytes(4, "big"))]
                 if chunk:
                     reply.fields.append((F.CHAT_MEDIA_CHUNK_SIZE, chunk.to_bytes(4, "big")))
             elif t.ty == Tx.DOWNLOAD_MEDIA:
@@ -215,7 +215,10 @@ def media_server(sent: list, chats=(), chunk=None):
                     assert t.uint(F.CHAT_MEDIA_PART_INDEX) == len(uploads[token]) // chunk
                 else:
                     token = b"t%d" % len(uploads)
-                    assert t.uint(F.CHAT_MEDIA_PART_COUNT) or t.uint(F.CHAT_MEDIA_PART_FINAL)
+                    count = t.uint(F.CHAT_MEDIA_PART_COUNT)
+                    assert count or t.uint(F.CHAT_MEDIA_PART_FINAL)
+                    if count and count > 1:  # a real server numbers the first part too
+                        assert t.uint(F.CHAT_MEDIA_PART_INDEX) == 0, "first part sent without its index"
                 uploads[token] = uploads.get(token, b"") + t.get(F.CHAT_MEDIA_PAYLOAD)
                 reply.fields = [(F.CHAT_MEDIA_UPLOAD_TOKEN, token)]
                 if t.uint(F.CHAT_MEDIA_PART_FINAL):
@@ -427,3 +430,27 @@ def test_an_oversized_screenshot_is_shrunk_to_fit():
     b = io.BytesIO()
     frames[0].save(b, "GIF", save_all=True, append_images=frames[1:])
     assert hl_bridge.hotline_image(b.getvalue(), "image/gif", 900, 900, 1000, 2048, 4194304) is None
+
+
+def test_a_split_upload_numbers_its_first_part():
+    """A picture past one field's length goes up in parts. A real server wants the first
+    part's index as well as the count, and rejects the whole picture without it; the
+    chunk size is also clamped up to 1024, so a split needs a payload past that.
+    """
+    async def run():
+        sent = []
+        server = await media_server(sent, chunk=1024, max_bytes=8192)
+        b, task = await bridge_on(server, [])
+        for _ in range(100):
+            if b.hl:
+                break
+            await asyncio.sleep(0.05)
+        data = bytes(range(256)) * 10  # 2560 bytes: three parts of 1024
+        assert b.hl.media_chunk == 1024
+        handle, mime = await b.hl.upload_media(data, "image/png")
+        task.cancel()
+        server.close()
+        assert handle == b"up1" and mime == "image/png"
+        assert ("upload", data) in sent, "the server did not get the picture back whole"
+
+    asyncio.run(run())

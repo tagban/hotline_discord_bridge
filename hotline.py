@@ -529,7 +529,7 @@ class Client:
         self.media_max_bytes = reply.uint(F.CHAT_MEDIA_MAX_BYTES) or 256 * 1024
         self.media_max_dimension = reply.uint(F.CHAT_MEDIA_MAX_DIMENSION) or 2048
         self.media_max_pixels = reply.uint(F.CHAT_MEDIA_MAX_PIXELS) or 2048 * 2048
-        self.media_chunk = min(reply.uint(F.CHAT_MEDIA_CHUNK_SIZE) or 60000, 0xFFFF)
+        self.media_chunk = min(max(reply.uint(F.CHAT_MEDIA_CHUNK_SIZE) or 60000, 1024), 0xFFFF)
         self.server_name = self.dec(reply.get(F.SERVER_NAME)) or None
         self.wire = wire
         self.closed.clear()
@@ -738,6 +738,8 @@ class Client:
 
     async def upload_media(self, data: bytes, mime: str) -> tuple[bytes, str]:
         """Image bytes to a media handle for send_chat: handle, canonical MIME type."""
+        if len(data) > self.media_max_bytes:
+            raise HotlineError("That picture is too big for this server.")
         parts = [data[i:i + self.media_chunk] for i in range(0, len(data), self.media_chunk)] or [b""]
         token = None
         for i, part in enumerate(parts):
@@ -745,7 +747,9 @@ class Client:
             if i == 0:
                 f.append((F.CHAT_MEDIA_DECLARED_TYPE, self.enc(mime)))
                 if len(parts) > 1:
-                    f.append(u16(F.CHAT_MEDIA_PART_COUNT, len(parts)))
+                    # The first part of a split upload carries its index as well as the
+                    # count. Without the index a strict server rejects the whole picture.
+                    f += [u16(F.CHAT_MEDIA_PART_INDEX, 0), u16(F.CHAT_MEDIA_PART_COUNT, len(parts))]
             elif token is None:
                 raise HotlineError("The server gave no upload token.")
             else:
