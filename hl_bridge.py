@@ -80,6 +80,7 @@ def discord_text(text: str) -> str:
 CHAT_LINE = re.compile(r"^\s*(.{1,31}?):\s{1,2}(.*)$", re.S)
 EMOTE_LINE = re.compile(r"^\s*\*{3}\s+(\S+)\s+(.*)$", re.S)
 HOTLINE_LINE_MAX = 240  # longer lines are split; old clients cut them off
+MAX_IMAGE_FETCH = 12 * 1024 * 1024  # past this, not worth fetching an attachment to shrink it
 ICON_DISCORD, ICON_WEB, ICON_DEFAULT = 134, 131, 128
 
 
@@ -116,6 +117,45 @@ def square_icon(data: bytes, size: int = 128) -> bytes:
     out = io.BytesIO()
     im.resize((size, size), Image.NEAREST).save(out, "PNG")
     return out.getvalue()
+
+
+def hotline_image(data: bytes, mime: str, w: int, h: int,
+                  max_bytes: int, max_dim: int, max_pixels: int) -> tuple[bytes, str] | None:
+    """An attachment as a Hotline server will take it for an inline image, or None if it will not.
+
+    A server's defaults are 256 KiB and 2048 pixels, which almost nothing posted on Discord meets:
+    a 720p screenshot is already around 900 KiB. So anything over the limits is scaled down and
+    re-encoded until it fits. One that already fits is passed through untouched. An animated GIF is
+    only offered as it is, because re-encoding would flatten it, and its link says more than one frame.
+    """
+    if len(data) <= max_bytes and max(w, h) <= max_dim and w * h <= max_pixels:
+        return data, mime
+    from PIL import Image
+    try:
+        im = Image.open(io.BytesIO(data))
+        if getattr(im, "n_frames", 1) > 1:
+            return None
+        im.load()
+    except Exception:
+        return None  # whatever Discord called it, this is not an image we can read
+    scale = min(max_dim / max(im.width, im.height), (max_pixels / (im.width * im.height)) ** 0.5, 1.0)
+    if scale < 1.0:
+        im = im.resize((max(1, int(im.width * scale)), max(1, int(im.height * scale))), Image.LANCZOS)
+    for _ in range(4):
+        if mime == "image/png":  # flat colour and text stay sharper lossless, and often fit
+            out = io.BytesIO()
+            im.convert("RGBA").save(out, "PNG", optimize=True)
+            if out.tell() <= max_bytes:
+                return out.getvalue(), "image/png"
+        for quality in (85, 70, 55, 40):
+            out = io.BytesIO()
+            im.convert("RGB").save(out, "JPEG", quality=quality, optimize=True)
+            if out.tell() <= max_bytes:
+                return out.getvalue(), "image/jpeg"
+        if im.width * 2 // 3 < 160:  # smaller than this is not worth showing
+            break
+        im = im.resize((im.width * 2 // 3, im.height * 2 // 3), Image.LANCZOS)
+    return None
 
 
 def hotline_text(text: str) -> str:
@@ -462,21 +502,33 @@ class Bridge(discord.Client):
         # Fetch from Discord before taking the lock: the CDN read is the slow part, and aiohttp's
         # own ceiling for it is five minutes. Holding the lock through that stops every other
         # message. Both awaits go inside the wait_for, or the timeout arms only once the read ends.
-        fetched = []
+        hl, fetched = self.hl, []
         for a in attachments:
-            if not self.fits_hotline(self.hl, a):
+            why = self.why_not_inline(hl, a)
+            if why:
+                log.info("Image stays a link, %s: %s", why, a.filename)
                 continue
             try:
-                fetched.append((a, await asyncio.wait_for(a.read(), 20),
-                                (a.content_type or "").split(";")[0]))
+                data = await asyncio.wait_for(a.read(), 20)
+                image = await asyncio.to_thread(
+                    hotline_image, data, (a.content_type or "").split(";")[0].lower(),
+                    a.width, a.height, hl.media_max_bytes, hl.media_max_dimension, hl.media_max_pixels)
             except Exception as e:
                 log.warning("Image from Discord: %s", e)
                 break
+            if image is None:
+                log.info("Image stays a link, it will not fit in %d KiB: %s",
+                         hl.media_max_bytes // 1024, a.filename)
+                continue
+            if len(image[0]) != len(data):
+                log.info("Image shrunk for Hotline, %d KiB -> %d KiB as %s: %s",
+                         len(data) // 1024, len(image[0]) // 1024, image[1], a.filename)
+            fetched.append((a, image))
         async with self.hotline_lock:
-            hl, images = self.hl, {}
-            for a, data, mime in fetched:
-                if not self.fits_hotline(hl, a):  # the session may have changed while we fetched
-                    continue
+            images = {}
+            for a, (data, mime) in fetched:
+                if self.hl is not hl:  # reconnected while we were fetching: the handle would be dropped
+                    break
                 try:
                     images[a.url] = await asyncio.wait_for(hl.upload_media(data, mime), 30)
                 except Exception as e:
@@ -499,16 +551,23 @@ class Bridge(discord.Client):
                     self.outbox.append((time.time(), line))
 
     @staticmethod
-    def fits_hotline(hl: hotline.Client | None, a: discord.Attachment) -> bool:
-        """Whether the server takes images, and this one is a kind it keeps (any other is refused,
-        but still spends the account's upload allowance) within its limits."""
-        if not (hl and hl.inline_media and not a.is_spoiler()
-                and (a.content_type or "").split(";")[0] in ("image/png", "image/jpeg", "image/gif")):
-            return False
-        w, h = a.width or 0, a.height or 0
-        if not (w and h):  # Discord sizes real images; without that this is something else mislabelled
-            return False
-        return a.size <= hl.media_max_bytes and max(w, h) <= hl.media_max_dimension and w * h <= hl.media_max_pixels
+    def why_not_inline(hl: hotline.Client | None, a: discord.Attachment) -> str:
+        """Why this attachment cannot be tried as an inline image, or "" if it can be. The size
+        limits are not checked here: hotline_image() shrinks what is over them. Returned rather
+        than logged so the caller can name the file."""
+        kind = (a.content_type or "").split(";")[0].lower()
+        if not (hl and hl.inline_media):
+            return "the server takes no inline images"
+        if a.is_spoiler():
+            return "it is a spoiler"
+        if kind not in ("image/png", "image/jpeg", "image/gif"):
+            # Anything else is refused, and a refusal still spends the upload allowance.
+            return f"the server keeps no {kind or 'file of unknown type'}"
+        if not (a.width and a.height):
+            return "it carries no image size, so it is something else mislabelled"
+        if a.size > MAX_IMAGE_FETCH:
+            return f"{a.size // 1024 // 1024} MB is more than we will fetch to shrink"
+        return ""
 
     async def to_discord(self, author: str, source: str, text: str,
                          image: tuple[bytes, str] | None = None) -> None:

@@ -265,6 +265,7 @@ def test_discord_images_reach_hotline():
     class Attachment:
         def __init__(self, url, data, content_type="image/png"):
             self.url, self.data, self.content_type, self.size = url, data, content_type, len(data)
+            self.filename = url.rsplit("/", 1)[-1]
             self.width = self.height = 16
 
         def is_spoiler(self):
@@ -318,6 +319,7 @@ class FakeHotline:
 class Img:
     def __init__(self, url, data=b"png", content_type="image/png", width=16, height=16, read=None):
         self.url, self.data, self.content_type, self.size = url, data, content_type, len(data)
+        self.filename = url.rsplit("/", 1)[-1]
         self.width, self.height, self._read = width, height, read
 
     def is_spoiler(self):
@@ -376,9 +378,52 @@ def test_a_mislabelled_or_prelogin_attachment_goes_as_a_link():
     """Discord sizes real images; and before login the client offers no media at all."""
     import hotline
 
+    why = hl_bridge.Bridge.why_not_inline
     hl = FakeHotline()
-    assert hl_bridge.Bridge.fits_hotline(hl, Img("https://cdn/a.png")) is True
+    assert why(hl, Img("https://cdn/a.png")) == ""
     # A .exe that Discord labelled image/png carries no dimensions.
-    assert hl_bridge.Bridge.fits_hotline(hl, Img("https://cdn/x.png", width=None, height=None)) is False
+    assert "mislabelled" in why(hl, Img("https://cdn/x.png", width=None, height=None))
+    assert "keeps no" in why(hl, Img("https://cdn/n.txt", content_type="text/plain"))
+    assert "will fetch" in why(hl, Img("https://cdn/huge.png", data=b"x" * (13 * 1024 * 1024)))
     fresh = hotline.Client("h", 5500, "guest", "", nickname="Relay")
-    assert hl_bridge.Bridge.fits_hotline(fresh, Img("https://cdn/a.png")) is False
+    assert "no inline images" in why(fresh, Img("https://cdn/a.png"))
+
+
+def test_an_oversized_screenshot_is_shrunk_to_fit():
+    """256 KiB and 2048 px exclude every real screenshot, so what is over them gets scaled down."""
+    import io
+
+    from PIL import Image
+
+    def shot(w, h):
+        im = Image.new("RGB", (w, h))
+        px = im.load()
+        for y in range(0, h, 2):  # noise, so it cannot just compress away
+            for x in range(0, w, 2):
+                px[x, y] = ((x * 7) % 256, (y * 13) % 256, (x * y) % 256)
+        b = io.BytesIO()
+        im.save(b, "PNG")
+        return b.getvalue()
+
+    big = shot(2880, 1800)
+    assert len(big) > 262144 and 2880 > 2048, "the fixture must actually be over the limits"
+    out = hl_bridge.hotline_image(big, "image/png", 2880, 1800, 262144, 2048, 4194304)
+    assert out is not None, "an oversized screenshot must still reach Hotline as an image"
+    data, mime = out
+    assert len(data) <= 262144
+    im = Image.open(io.BytesIO(data))
+    assert max(im.size) <= 2048 and im.size[0] * im.size[1] <= 4194304
+
+    # One already within the limits is passed through byte for byte, not re-encoded.
+    small = shot(64, 64)
+    assert hl_bridge.hotline_image(small, "image/png", 64, 64, 262144, 2048, 4194304) == (small, "image/png")
+
+    # Not an image at all, whatever Discord labelled it.
+    assert hl_bridge.hotline_image(b"MZ\x90" + b"x" * 300000, "image/png", 99, 99,
+                                   262144, 2048, 4194304) is None
+
+    # An oversized animated GIF keeps its animation by staying a link.
+    frames = [Image.new("P", (900, 900), i) for i in range(3)]
+    b = io.BytesIO()
+    frames[0].save(b, "GIF", save_all=True, append_images=frames[1:])
+    assert hl_bridge.hotline_image(b.getvalue(), "image/gif", 900, 900, 1000, 2048, 4194304) is None
